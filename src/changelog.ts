@@ -6,6 +6,13 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "0.6.0",
+    date: "September 27, 2026",
+    notes: [
+      "Choose Duplicate connection from a connection's menu to open a new connection form filled in with its settings, including SSH, and named Copy of followed by the original name. Passwords and SSH secrets aren't copied, so enter them before saving.",
+    ],
+  },
+  {
     version: "0.5.0",
     date: "September 26, 2026",
     notes: [
