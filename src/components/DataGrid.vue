@@ -38,6 +38,8 @@ const props = defineProps<{
   modified?: Map<number, Set<number>>;
   /** Per column, the record a value points to (such as `users.id`), or null for plain columns. */
   links?: (string | null)[];
+  /** Emits `cellMenu` and `headerMenu` on right-click instead of showing the default menu. */
+  contextMenus?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -47,7 +49,23 @@ const emit = defineEmits<{
   setNull: [cells: CellPosition[]];
   create: [];
   follow: [row: number, col: number];
+  cellMenu: [row: number, col: number, event: MouseEvent];
+  headerMenu: [col: number, event: MouseEvent];
 }>();
+
+function onCellContextMenu(event: MouseEvent, row: number, col: number) {
+  if (props.contextMenus && !isEditing(row, col)) {
+    event.preventDefault();
+    emit("cellMenu", row, col, event);
+  }
+}
+
+function onHeaderContextMenu(event: MouseEvent, col: number) {
+  if (props.contextMenus) {
+    event.preventDefault();
+    emit("headerMenu", col, event);
+  }
+}
 
 const { gridFontSize, maxAutoColumnWidth, showToast } = useApp();
 
@@ -605,6 +623,7 @@ defineExpose({ scrollToTop, commitEdit, editCell });
         role="columnheader"
         :title="headerTitle(column, index)"
         @click="onHeaderClick($event, column)"
+        @contextmenu="onHeaderContextMenu($event, index)"
       >
         <span class="grid-header-name">{{ column.name }}</span>
         <span v-if="sortColumn === column.name" class="grid-sort" aria-hidden="true">
@@ -651,6 +670,7 @@ defineExpose({ scrollToTop, commitEdit, editCell });
             :title="isEditing(item.index, col) ? undefined : cellTitle(value)"
             @mousedown.prevent="selectCell($event, item.index, col)"
             @dblclick.stop="startEdit(item.index, col)"
+            @contextmenu="onCellContextMenu($event, item.index, col)"
           >
             <textarea
               v-if="isEditing(item.index, col)"

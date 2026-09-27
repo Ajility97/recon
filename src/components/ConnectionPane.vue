@@ -7,10 +7,21 @@ import * as api from "../api";
 import { SIDEBAR_MAX, SIDEBAR_MIN, useApp } from "../composables/useApp";
 import { useConnectionForm } from "../composables/useConnectionForm";
 import { registerInnerTabCloser, setLiveTitle, useTabs } from "../composables/useTabs";
+import type { FilterPreviewGroup } from "../filters/compile";
+import { placePopover, type PopoverPosition } from "../composables/usePopover";
+import {
+  cloneNode,
+  emptyGroup,
+  hasConditions,
+  linkFilter,
+  newId,
+  sanitizeFilter,
+  type TableViewState,
+} from "../filters/model";
 import {
   driverLabel,
   type BackupInfo,
-  type CellEdit,
+  type SaveRequest,
   type SavedQuery,
   type SessionInfo,
   type TableInfo,
@@ -21,6 +32,7 @@ import ConnectionViewTabs, { type ConnectionViewTab } from "./ConnectionViewTabs
 import DatabaseSwitcher from "./DatabaseSwitcher.vue";
 import DriverIcon from "./DriverIcon.vue";
 import ExportDialog from "./ExportDialog.vue";
+import FilterPreview from "./FilterPreview.vue";
 import ImportDialog from "./ImportDialog.vue";
 import Modal from "./Modal.vue";
 import QueryEditor from "./QueryEditor.vue";
@@ -29,18 +41,18 @@ import RestoreDialog from "./RestoreDialog.vue";
 import SavedQueries from "./SavedQueries.vue";
 import TableView from "./TableView.vue";
 
-type PaneTab =
-  | {
-      id: string;
-      kind: "table";
-      namespace: string;
-      table: string;
-      tableKind: "table" | "view";
-      filter?: CellEdit[];
-    }
-  | { id: string; kind: "query"; key: string; title: string; savedId?: string };
+/** Table tab ids are opaque, so several tabs can show the same table with different filters. */
+type TableTab = { id: string; kind: "table" } & TableViewState;
+
+type PaneTab = TableTab | { id: string; kind: "query"; key: string; title: string; savedId?: string };
 
 type QueryTab = Extract<PaneTab, { kind: "query" }>;
+
+interface FilterIndicator {
+  count: number;
+  summary: string;
+  preview: FilterPreviewGroup | null;
+}
 
 const SAVED_TAB_ID = "saved-queries";
 
@@ -86,6 +98,15 @@ const activeTableTabId = ref("");
 const activeQueryTabId = ref("");
 const tabsRestored = ref(false);
 const dirtyTabs = ref(new Map<string, number>());
+const filteredTabs = ref(new Map<string, FilterIndicator>());
+const filterPopover = ref<{ tabId: string; position: PopoverPosition } | null>(null);
+const filterPopoverEl = ref<HTMLElement | null>(null);
+let filterPopoverTimer = 0;
+const popoverFilters = computed(() =>
+  filterPopover.value ? (filteredTabs.value.get(filterPopover.value.tabId) ?? null) : null,
+);
+const tabActivity = new Map<string, number>();
+let tableTabsSaveTimer = 0;
 const saving = ref(false);
 const nameDialog = ref<{ mode: "create" } | { mode: "rename"; from: string } | null>(null);
 const nameValue = ref("");
@@ -154,6 +175,7 @@ watch(
 );
 
 const queryTabsKey = computed(() => `recon.queryTabs.${props.sessionId}`);
+const tableTabsKey = computed(() => `recon.tableTabs.${props.sessionId}`);
 
 const connectionSaved = computed(() =>
   savedQueries.value.filter((query) => query.connectionId === props.connectionId),
@@ -165,6 +187,45 @@ const showSavedTab = computed(() => view.value === "sql" && connectionSaved.valu
 const menuTab = computed(() => {
   const tab = tabs.value.find((item) => item.id === tabMenu.value?.tabId);
   return tab?.kind === "query" ? tab : null;
+});
+const menuTableTab = computed(() => {
+  const tab = tabs.value.find((item) => item.id === tabMenu.value?.tabId);
+  return tab?.kind === "table" ? tab : null;
+});
+
+function tableKey(tableNamespace: string, table: string) {
+  return `${tableNamespace}\u0000${table}`;
+}
+
+const activeTableKey = computed(() => {
+  const tab = tabs.value.find((item) => item.id === activeTableTabId.value);
+  return tab?.kind === "table" ? tableKey(tab.namespace, tab.table) : "";
+});
+const dirtyTableKeys = computed(
+  () =>
+    new Set(
+      tabs.value.flatMap((tab) =>
+        tab.kind === "table" && dirtyTabs.value.has(tab.id) ? [tableKey(tab.namespace, tab.table)] : [],
+      ),
+    ),
+);
+
+/** Tabs on the same table without a custom name are numbered in tab order: orders, orders · 2. */
+const tableTitleSuffix = computed(() => {
+  const seen = new Map<string, number>();
+  const suffix = new Map<string, string>();
+  for (const tab of tabs.value) {
+    if (tab.kind !== "table" || tab.title) {
+      continue;
+    }
+    const key = tableKey(tab.namespace, tab.table);
+    const count = (seen.get(key) ?? 0) + 1;
+    seen.set(key, count);
+    if (count > 1) {
+      suffix.set(tab.id, ` · ${count}`);
+    }
+  }
+  return suffix;
 });
 
 const viewTabs = computed(() => {
@@ -266,6 +327,85 @@ function restoreQueryTabs() {
   saveQueryTabs();
 }
 
+function saveTableTabs() {
+  window.clearTimeout(tableTabsSaveTimer);
+  tableTabsSaveTimer = 0;
+  if (!tabsRestored.value) {
+    return;
+  }
+  const saved = {
+    active: activeTableTabId.value,
+    tabs: tabs.value.flatMap((tab) =>
+      tab.kind === "table"
+        ? [
+            {
+              id: tab.id,
+              namespace: tab.namespace,
+              table: tab.table,
+              tableKind: tab.tableKind,
+              filter: tab.filter,
+              sort: tab.sort,
+              panelOpen: tab.panelOpen,
+              origin: tab.origin,
+              title: tab.title,
+            },
+          ]
+        : [],
+    ),
+  };
+  try {
+    localStorage.setItem(tableTabsKey.value, JSON.stringify(saved));
+  } catch {
+    // Storage is full; the tabs still work for this session.
+  }
+}
+
+function scheduleSaveTableTabs() {
+  window.clearTimeout(tableTabsSaveTimer);
+  tableTabsSaveTimer = window.setTimeout(saveTableTabs, 300);
+}
+
+function restoredTableTab(value: unknown): TableTab | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const item = value as Record<string, unknown>;
+  if (typeof item.id !== "string" || typeof item.namespace !== "string" || typeof item.table !== "string") {
+    return null;
+  }
+  const sort = item.sort as Record<string, unknown> | null | undefined;
+  return {
+    id: item.id,
+    kind: "table",
+    namespace: item.namespace,
+    table: item.table,
+    tableKind: item.tableKind === "view" ? "view" : "table",
+    filter: sanitizeFilter(item.filter),
+    sort:
+      sort && typeof sort.column === "string" && (sort.dir === "asc" || sort.dir === "desc")
+        ? { column: sort.column, dir: sort.dir }
+        : null,
+    panelOpen: item.panelOpen === true,
+    origin: item.origin === "link" ? "link" : "user",
+    title: typeof item.title === "string" && item.title ? item.title : undefined,
+  };
+}
+
+function restoreTableTabs() {
+  let saved: { active?: unknown; tabs?: unknown } = {};
+  try {
+    saved = JSON.parse(localStorage.getItem(tableTabsKey.value) ?? "{}") ?? {};
+  } catch {
+    saved = {};
+  }
+  const restored = (Array.isArray(saved.tabs) ? saved.tabs : [])
+    .map(restoredTableTab)
+    .filter((tab): tab is TableTab => tab !== null);
+  tabs.value = [...tabs.value, ...restored];
+  const active = restored.find((tab) => tab.id === saved.active) ?? restored[0];
+  activeTableTabId.value = active?.id ?? "";
+}
+
 function openQueryTab(initialSql?: string) {
   const key = nextQueryKey();
   const tab: PaneTab = { id: `query:${key}`, kind: "query", key, title: queryTitle() };
@@ -346,7 +486,7 @@ watch(connectionSaved, (list) => {
   }
 });
 
-function startTabRename(tab: QueryTab) {
+function startTabRename(tab: PaneTab) {
   closeMenus();
   selectTab(tab);
   renameValue.value = tabTitle(tab);
@@ -363,6 +503,16 @@ function cancelTabRename() {
 }
 
 async function commitTabRename() {
+  const tableTab = tabs.value.find((item): item is TableTab => item.id === renamingTabId.value && item.kind === "table");
+  if (tableTab) {
+    renamingTabId.value = "";
+    const name = renameValue.value.trim();
+    const title = name && name !== baseTableTitle(tableTab) ? name : undefined;
+    if (title !== tableTab.title) {
+      updateView(tableTab.id, { title });
+    }
+    return;
+  }
   const tab = tabs.value.find((item): item is QueryTab => item.id === renamingTabId.value && item.kind === "query");
   renamingTabId.value = "";
   const name = renameValue.value.trim();
@@ -451,16 +601,152 @@ function showInSaved(tab: QueryTab) {
   }
 }
 
-function openTable(table: TableInfo) {
-  const id = `table:${namespace.value}.${table.name}`;
-  if (!tabs.value.some((tab) => tab.id === id)) {
-    tabs.value = [
-      ...tabs.value,
-      { id, kind: "table", namespace: namespace.value, table: table.name, tableKind: table.kind },
-    ];
-  }
-  activeTableTabId.value = id;
+function newTableTab(
+  tableNamespace: string,
+  table: string,
+  tableKind: "table" | "view",
+  patch: Partial<TableViewState> = {},
+): TableTab {
+  return {
+    id: `table:${newId("")}`,
+    kind: "table",
+    namespace: tableNamespace,
+    table,
+    tableKind,
+    filter: emptyGroup(),
+    sort: null,
+    panelOpen: false,
+    origin: "user",
+    ...patch,
+  };
 }
+
+function tabsForTable(tableNamespace: string, table: string) {
+  return tabs.value.filter(
+    (tab): tab is TableTab => tab.kind === "table" && tab.namespace === tableNamespace && tab.table === table,
+  );
+}
+
+function mostRecentTab(list: TableTab[]) {
+  let best: TableTab | undefined;
+  for (const tab of list) {
+    if (!best || (tabActivity.get(tab.id) ?? 0) >= (tabActivity.get(best.id) ?? 0)) {
+      best = tab;
+    }
+  }
+  return best;
+}
+
+/** Adds a table tab right after `afterId`, or at the end, and focuses it. */
+function insertTableTab(tab: TableTab, afterId?: string) {
+  const next = [...tabs.value];
+  const index = afterId ? next.findIndex((item) => item.id === afterId) : -1;
+  next.splice(index >= 0 ? index + 1 : next.length, 0, tab);
+  tabs.value = next;
+  activeTableTabId.value = tab.id;
+  scheduleSaveTableTabs();
+}
+
+/** Focuses the most recently used tab on `table`, unless `newTab` asks for another view of it. */
+function openTable(table: TableInfo, newTab = false) {
+  const existing = tabsForTable(namespace.value, table.name);
+  const recent = newTab ? undefined : mostRecentTab(existing);
+  if (recent) {
+    activeTableTabId.value = recent.id;
+    return;
+  }
+  insertTableTab(newTableTab(namespace.value, table.name, table.kind), existing[existing.length - 1]?.id);
+}
+
+function updateView(id: string, patch: Partial<TableViewState>) {
+  tabs.value = tabs.value.map((tab) => (tab.id === id && tab.kind === "table" ? { ...tab, ...patch } : tab));
+  scheduleSaveTableTabs();
+}
+
+function setFilterIndicator(id: string, indicator: FilterIndicator) {
+  const current = filteredTabs.value.get(id);
+  if (
+    current?.count === indicator.count &&
+    current.summary === indicator.summary &&
+    JSON.stringify(current.preview) === JSON.stringify(indicator.preview)
+  ) {
+    return;
+  }
+  const next = new Map(filteredTabs.value);
+  if (indicator.count) {
+    next.set(id, indicator);
+  } else if (current) {
+    next.delete(id);
+  } else {
+    return;
+  }
+  filteredTabs.value = next;
+}
+
+function resetTableTitle(tab: TableTab) {
+  closeMenus();
+  updateView(tab.id, { title: undefined });
+}
+
+function closeTableTab(tab: TableTab) {
+  closeMenus();
+  closeTab(tab.id);
+}
+
+type CloseScope = "others" | "left" | "right";
+
+/** Table tabs beside `tab` in tab-bar order. */
+function tableTabsBeside(tab: TableTab, scope: CloseScope) {
+  const list = tabs.value.filter((item): item is TableTab => item.kind === "table");
+  const index = list.findIndex((item) => item.id === tab.id);
+  if (scope === "left") {
+    return list.slice(0, index);
+  }
+  if (scope === "right") {
+    return list.slice(index + 1);
+  }
+  return list.filter((item) => item.id !== tab.id);
+}
+
+/** Closes several table tabs, asking once if any of them have unsaved changes. */
+async function closeTableTabs(tab: TableTab, scope: CloseScope) {
+  closeMenus();
+  const closing = tableTabsBeside(tab, scope);
+  if (!closing.length) {
+    return;
+  }
+  const dirty = closing.filter((item) => dirtyTabs.value.has(item.id));
+  if (dirty.length) {
+    const names = dirty.slice(0, 3).map((item) => `“${tabTitle(item)}”`).join(", ");
+    const more = dirty.length > 3 ? ` and ${dirty.length - 3} more` : "";
+    const ok = await confirm(`Discard unsaved changes to ${names}${more}?`, {
+      title: "Unsaved changes",
+      kind: "warning",
+      okLabel: "Discard",
+      cancelLabel: "Cancel",
+    });
+    if (!ok) {
+      return;
+    }
+  }
+  for (const item of closing) {
+    setTabChanges(item.id, 0);
+    removeTab(item.id);
+  }
+  activeTableTabId.value = tab.id;
+}
+
+function duplicateTableTab(tab: TableTab) {
+  closeMenus();
+  insertTableTab({ ...tab, id: `table:${newId("")}`, filter: cloneNode(tab.filter), origin: "user", title: undefined }, tab.id);
+}
+
+watch(activeTableTabId, (id) => {
+  if (id) {
+    tabActivity.set(id, Date.now());
+  }
+  scheduleSaveTableTabs();
+});
 
 function activeTableName() {
   const tab = tabs.value.find((item) => item.id === activeTableTabId.value);
@@ -470,9 +756,16 @@ function activeTableName() {
 /**
  * Finder-style selection: a plain click opens the table and selects only it,
  * Cmd+click toggles a table without opening it, and Shift+click selects the
- * visible range from the last clicked table.
+ * visible range from the last clicked table. Option+click opens another tab
+ * on the table.
  */
 function onTableClick(event: MouseEvent, table: TableInfo) {
+  if (event.altKey) {
+    selectedTables.value = new Set([table.name]);
+    selectionAnchor = table.name;
+    openTable(table, true);
+    return;
+  }
   if (event.metaKey || event.ctrlKey) {
     const next = new Set(selectedTables.value);
     const active = activeTableName();
@@ -560,9 +853,6 @@ function openTableMenu(event: MouseEvent, table: TableInfo) {
 }
 
 function openTabMenu(event: MouseEvent, tab: PaneTab) {
-  if (tab.kind !== "query") {
-    return;
-  }
   event.preventDefault();
   closeMenus();
   tabMenu.value = { x: event.clientX, y: event.clientY, tabId: tab.id };
@@ -570,15 +860,15 @@ function openTabMenu(event: MouseEvent, tab: PaneTab) {
   fitMenu(tabMenu, tabMenuEl);
 }
 
-function runTableAction(action: "open" | "query" | "copy" | "export") {
+function runTableAction(action: "open" | "openNew" | "query" | "copy" | "export") {
   const chosen = tableMenu.value?.tables ?? [];
   closeMenus();
   const table = tables.value.find((item) => item.name === chosen[0]);
   if (!table) {
     return;
   }
-  if (action === "open") {
-    openTable(table);
+  if (action === "open" || action === "openNew") {
+    openTable(table, action === "openNew");
   } else if (action === "query") {
     queryTable(table);
   } else if (action === "copy") {
@@ -635,32 +925,28 @@ watch(tables, (list) => {
   }
 });
 
-function setTableFilter(id: string, filter: CellEdit[] | undefined) {
-  tabs.value = tabs.value.map((tab) => (tab.id === id && tab.kind === "table" ? { ...tab, filter } : tab));
-}
-
+/**
+ * Reuses a tab on the target table only when that tab has no filters or its
+ * filter also came from an arrow, so filters the user built are never replaced.
+ */
 function followLink(link: TableLink) {
-  const id = `table:${link.namespace}.${link.table}`;
-  if (tabs.value.some((tab) => tab.id === id)) {
-    setTableFilter(id, link.filter);
-  } else {
-    const known = link.namespace === namespace.value
-      ? tables.value.find((table) => table.name === link.table)
-      : undefined;
-    tabs.value = [
-      ...tabs.value,
-      {
-        id,
-        kind: "table",
-        namespace: link.namespace,
-        table: link.table,
-        tableKind: known?.kind ?? "table",
-        filter: link.filter,
-      },
-    ];
-  }
+  const filter = linkFilter(link.filter);
   view.value = "tables";
-  activeTableTabId.value = id;
+  const reusable = mostRecentTab(
+    tabsForTable(link.namespace, link.table).filter((tab) => tab.origin === "link" || !hasConditions(tab.filter)),
+  );
+  if (reusable) {
+    updateView(reusable.id, { filter, origin: "link" });
+    activeTableTabId.value = reusable.id;
+    return;
+  }
+  const known = link.namespace === namespace.value
+    ? tables.value.find((table) => table.name === link.table)
+    : undefined;
+  insertTableTab(
+    newTableTab(link.namespace, link.table, known?.kind ?? "table", { filter, origin: "link" }),
+    activeTableTabId.value,
+  );
 }
 
 function selectTab(tab: PaneTab) {
@@ -708,11 +994,49 @@ function dirtyTableViews() {
   return [...dirtyTabs.value.keys()].flatMap((id) => tableViews.get(id) ?? []);
 }
 
+/**
+ * Row edits from different tabs on the same table that set one cell to
+ * different values. Saves run in tab order, so the rightmost tab's value wins.
+ */
+function editConflicts(requests: SaveRequest[]) {
+  const seen = new Map<string, { value: unknown; tab: number }>();
+  const conflicts: string[] = [];
+  requests.forEach((request, tab) => {
+    for (const update of request.updates) {
+      const row = update.key.map((cell) => `${cell.column} = ${cell.value}`).join(", ");
+      for (const change of update.changes) {
+        const key = JSON.stringify([request.namespace, request.table, update.key, change.column]);
+        const earlier = seen.get(key);
+        if (earlier && earlier.tab !== tab && earlier.value !== change.value) {
+          conflicts.push(`${request.table}.${change.column} where ${row}`);
+        }
+        seen.set(key, { value: change.value, tab });
+      }
+    }
+  });
+  return conflicts;
+}
+
 async function saveAll() {
   if (saving.value) {
     return;
   }
-  const pending = [...tableViews.values()].map((view) => ({ view, ...view.pendingChanges() }));
+  const pending = tabs.value.flatMap((tab) => {
+    const view = tab.kind === "table" ? tableViews.get(tab.id) : undefined;
+    return view ? [{ view, ...view.pendingChanges() }] : [];
+  });
+  const conflicts = editConflicts(pending.map((item) => item.request));
+  if (conflicts.length) {
+    const listed = conflicts.slice(0, 3).join("\n");
+    const more = conflicts.length > 3 ? `\n…and ${conflicts.length - 3} more` : "";
+    const ok = await confirm(
+      `Two tabs change the same cell to different values:\n${listed}${more}\n\nThe value from the tab furthest to the right will be saved.`,
+      { title: "Conflicting edits", kind: "warning", okLabel: "Save anyway", cancelLabel: "Cancel" },
+    );
+    if (!ok) {
+      return;
+    }
+  }
   const changed = pending.filter(
     ({ request }) =>
       request.updates.length ||
@@ -821,8 +1145,19 @@ function removeTab(id: string) {
     if (activeQueryTabId.value === id) {
       activeQueryTabId.value = next || (connectionSaved.value.length ? SAVED_TAB_ID : "");
     }
-  } else if (activeTableTabId.value === id) {
-    activeTableTabId.value = next;
+  } else {
+    tabActivity.delete(id);
+    setFilterIndicator(id, { count: 0, summary: "", preview: null });
+    if (filterPopover.value?.tabId === id) {
+      filterPopover.value = null;
+    }
+    if (renamingTabId.value === id) {
+      renamingTabId.value = "";
+    }
+    if (activeTableTabId.value === id) {
+      activeTableTabId.value = mostRecentTab(remaining.filter((item): item is TableTab => item.kind === "table"))?.id ?? next;
+    }
+    scheduleSaveTableTabs();
   }
 }
 
@@ -837,11 +1172,41 @@ function closeActivePaneTab() {
   return true;
 }
 
+function baseTableTitle(tab: TableTab) {
+  return tab.namespace === namespace.value ? tab.table : `${tab.namespace}.${tab.table}`;
+}
+
 function tabTitle(tab: PaneTab) {
   if (tab.kind === "query") {
     return savedFor(tab)?.name ?? tab.title;
   }
-  return tab.namespace === namespace.value ? tab.table : `${tab.namespace}.${tab.table}`;
+  return tab.title || `${baseTableTitle(tab)}${tableTitleSuffix.value.get(tab.id) ?? ""}`;
+}
+
+function tabTooltip(tab: PaneTab) {
+  if (tab.kind === "query") {
+    return modifiedQueries.value.has(tab.id) ? `${tabTitle(tab)} (unsaved changes)` : tabTitle(tab);
+  }
+  return `${tab.namespace}.${tab.table}`;
+}
+
+/** Lists a tab's applied filters while the pointer is over its funnel icon. */
+function showFilterPopover(event: MouseEvent, tabId: string) {
+  window.clearTimeout(filterPopoverTimer);
+  const anchor = (event.currentTarget as HTMLElement).getBoundingClientRect();
+  filterPopover.value = { tabId, position: { left: anchor.left, top: anchor.bottom + 6 } };
+  void nextTick(() => {
+    if (filterPopover.value?.tabId === tabId) {
+      filterPopover.value = { tabId, position: placePopover(anchor, filterPopoverEl.value, 6) };
+    }
+  });
+}
+
+function hideFilterPopover() {
+  window.clearTimeout(filterPopoverTimer);
+  filterPopoverTimer = window.setTimeout(() => {
+    filterPopover.value = null;
+  }, 80);
 }
 
 function setEditorRef(id: string, instance: unknown) {
@@ -904,6 +1269,7 @@ async function connect(withPassword: string | null = null) {
     status.value = "connected";
     if (!tabsRestored.value) {
       restoreQueryTabs();
+      restoreTableTabs();
     }
     await loadTables();
   } catch (err) {
@@ -1009,16 +1375,10 @@ function startRename(name: string) {
 
 async function renameNamespace(from: string, to: string) {
   await api.renameDatabase(props.sessionId, from, to);
-  tabs.value = tabs.value.map((tab) => {
-    if (tab.kind !== "table" || tab.namespace !== from) {
-      return tab;
-    }
-    const id = `table:${to}.${tab.table}`;
-    if (activeTableTabId.value === tab.id) {
-      activeTableTabId.value = id;
-    }
-    return { ...tab, id, namespace: to };
-  });
+  tabs.value = tabs.value.map((tab) =>
+    tab.kind === "table" && tab.namespace === from ? { ...tab, namespace: to } : tab,
+  );
+  scheduleSaveTableTabs();
   const wasCurrent = namespace.value === from;
   await refreshNamespaces();
   if (wasCurrent) {
@@ -1237,7 +1597,7 @@ function autoFitSidebar() {
   const font = getComputedStyle(name);
   const base = `${font.fontWeight} ${font.fontSize} ${font.fontFamily}`;
   const longest = tables.value.reduce((max, table) => {
-    const dirty = dirtyTabs.value.has(`table:${namespace.value}.${table.name}`);
+    const dirty = dirtyTableKeys.value.has(tableKey(namespace.value, table.name));
     context.font = dirty ? `italic ${base}` : base;
     return Math.max(max, context.measureText(table.name).width + (dirty ? 12 : 0));
   }, 0);
@@ -1260,9 +1620,16 @@ function autoFitSidebar() {
 let stopLost: UnlistenFn | null = null;
 let stopRestored: UnlistenFn | null = null;
 
+function flushTableTabs() {
+  if (tableTabsSaveTimer && !extraTab.value) {
+    saveTableTabs();
+  }
+}
+
 onMounted(() => {
   window.addEventListener("keydown", onWindowKeydown, true);
   window.addEventListener("focus", onWindowFocus);
+  window.addEventListener("beforeunload", flushTableTabs);
   void listen<ConnectionEvent>("connection-lost", (event) => onConnectionLost(event.payload)).then(
     (unlisten) => {
       stopLost = unlisten;
@@ -1286,6 +1653,7 @@ const unregisterCloser = registerInnerTabCloser(props.sessionId, closeActivePane
 onUnmounted(() => {
   window.removeEventListener("keydown", onWindowKeydown, true);
   window.removeEventListener("focus", onWindowFocus);
+  window.removeEventListener("beforeunload", flushTableTabs);
   stopLost?.();
   stopRestored?.();
   closeMenus();
@@ -1293,12 +1661,16 @@ onUnmounted(() => {
   setLiveTitle(props.sessionId, "");
   void api.disconnect(props.sessionId).catch(() => undefined);
   if (extraTab.value) {
+    window.clearTimeout(tableTabsSaveTimer);
     for (const tab of tabs.value) {
       if (tab.kind === "query") {
         localStorage.removeItem(`recon.query.${tab.key}`);
       }
     }
     localStorage.removeItem(queryTabsKey.value);
+    localStorage.removeItem(tableTabsKey.value);
+  } else if (tableTabsSaveTimer) {
+    saveTableTabs();
   }
 });
 </script>
@@ -1496,19 +1868,19 @@ onUnmounted(() => {
               class="db-table"
               type="button"
               role="option"
-              :aria-selected="selectedTables.has(table.name) || activeTableTabId === `table:${namespace}.${table.name}`"
+              :aria-selected="selectedTables.has(table.name) || activeTableKey === tableKey(namespace, table.name)"
               :class="{
-                active: activeTableTabId === `table:${namespace}.${table.name}`,
+                active: activeTableKey === tableKey(namespace, table.name),
                 selected: selectedTables.has(table.name),
                 view: table.kind === 'view',
-                dirty: dirtyTabs.has(`table:${namespace}.${table.name}`),
+                dirty: dirtyTableKeys.has(tableKey(namespace, table.name)),
               }"
               :title="
-                dirtyTabs.has(`table:${namespace}.${table.name}`)
+                dirtyTableKeys.has(tableKey(namespace, table.name))
                   ? `${table.name} (unsaved changes)`
                   : table.kind === 'view'
-                    ? `${table.name} (view)`
-                    : table.name
+                    ? `${table.name} (view) · ⌥-click to open in a new tab`
+                    : `${table.name} · ⌥-click to open in a new tab`
               "
               @click="onTableClick($event, table)"
               @dblclick="!$event.metaKey && !$event.shiftKey && queryTable(table)"
@@ -1524,7 +1896,7 @@ onUnmounted(() => {
               </svg>
               <span class="db-table-name">{{ table.name }}</span>
               <span
-                v-if="dirtyTabs.has(`table:${namespace}.${table.name}`)"
+                v-if="dirtyTableKeys.has(tableKey(namespace, table.name))"
                 class="dirty-dot"
                 aria-label="Unsaved changes"
               />
@@ -1574,15 +1946,9 @@ onUnmounted(() => {
               }"
               role="tab"
               :aria-selected="activeTabId === tab.id"
-              :title="
-                tab.kind === 'table'
-                  ? `${tab.namespace}.${tab.table}`
-                  : modifiedQueries.has(tab.id)
-                    ? `${tabTitle(tab)} (unsaved changes)`
-                    : tabTitle(tab)
-              "
+              :title="filterPopover?.tabId === tab.id ? undefined : tabTooltip(tab)"
               @click="selectTab(tab)"
-              @dblclick="tab.kind === 'query' && startTabRename(tab)"
+              @dblclick="startTabRename(tab)"
               @contextmenu="openTabMenu($event, tab)"
               @auxclick.middle="closeTab(tab.id)"
             >
@@ -1592,6 +1958,18 @@ onUnmounted(() => {
               <svg v-else-if="tab.kind === 'query'" class="subtab-icon" viewBox="0 0 16 16" aria-hidden="true">
                 <path d="M5 4 1.5 8 5 12M11 4l3.5 4L11 12" />
               </svg>
+              <span
+                v-else-if="filteredTabs.has(tab.id)"
+                class="subtab-filter"
+                :aria-label="`${filteredTabs.get(tab.id)?.count} ${filteredTabs.get(tab.id)?.count === 1 ? 'filter' : 'filters'} applied: ${filteredTabs.get(tab.id)?.summary}`"
+                @mouseenter="showFilterPopover($event, tab.id)"
+                @mouseleave="hideFilterPopover"
+              >
+                <svg class="subtab-icon" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M2.5 3h11L9.2 8.2v4.3l-2.4 1.2V8.2L2.5 3Z" />
+                </svg>
+                <span class="subtab-filter-dot" aria-hidden="true" />
+              </span>
               <svg v-else class="subtab-icon" viewBox="0 0 16 16" aria-hidden="true">
                 <rect x="2" y="3" width="12" height="10" rx="1.5" />
                 <path d="M2 6.5h12M6.5 6.5V13" />
@@ -1657,16 +2035,15 @@ onUnmounted(() => {
             <TableView
               v-if="tab.kind === 'table'"
               :connection-id="sessionId"
-              :namespace="tab.namespace"
-              :table="tab.table"
-              :kind="tab.tableKind"
               :driver="driver"
-              :filter="tab.filter"
+              :view="tab"
               :ref="(instance) => setTableViewRef(tab.id, instance)"
               :active="active && view === 'tables' && activeTableTabId === tab.id"
               @changes="setTabChanges(tab.id, $event)"
               @follow="followLink"
-              @clear-filter="setTableFilter(tab.id, undefined)"
+              @update:view="updateView(tab.id, $event)"
+              @filter-state="setFilterIndicator(tab.id, $event)"
+              @open-sql="openQueryTab($event)"
             />
             <QueryEditor
               v-else
@@ -1741,6 +2118,9 @@ onUnmounted(() => {
             <button class="overflow-menu-item" type="button" role="menuitem" @click="runTableAction('open')">
               Open
             </button>
+            <button class="overflow-menu-item" type="button" role="menuitem" @click="runTableAction('openNew')">
+              Open in new tab
+            </button>
             <button class="overflow-menu-item" type="button" role="menuitem" @click="runTableAction('query')">
               Query
             </button>
@@ -1791,6 +2171,74 @@ onUnmounted(() => {
               Show in Saved queries
             </button>
           </template>
+        </div>
+        <div
+          v-if="tabMenu && menuTableTab"
+          ref="tabMenuEl"
+          class="overflow-menu-dropdown table-context-menu"
+          role="menu"
+          :aria-label="`${tabTitle(menuTableTab)} actions`"
+          :style="{ left: `${tabMenu.x}px`, top: `${tabMenu.y}px` }"
+          @contextmenu.prevent
+        >
+          <button class="overflow-menu-item" type="button" role="menuitem" @click="duplicateTableTab(menuTableTab)">
+            Duplicate tab
+          </button>
+          <button class="overflow-menu-item" type="button" role="menuitem" @click="startTabRename(menuTableTab)">
+            Rename…
+          </button>
+          <button
+            v-if="menuTableTab.title"
+            class="overflow-menu-item"
+            type="button"
+            role="menuitem"
+            @click="resetTableTitle(menuTableTab)"
+          >
+            Reset name
+          </button>
+          <div class="overflow-menu-divider" role="separator" />
+          <button class="overflow-menu-item" type="button" role="menuitem" @click="closeTableTab(menuTableTab)">
+            Close tab
+          </button>
+          <button
+            class="overflow-menu-item"
+            type="button"
+            role="menuitem"
+            :disabled="!tableTabsBeside(menuTableTab, 'others').length"
+            @click="closeTableTabs(menuTableTab, 'others')"
+          >
+            Close other tabs
+          </button>
+          <button
+            class="overflow-menu-item"
+            type="button"
+            role="menuitem"
+            :disabled="!tableTabsBeside(menuTableTab, 'left').length"
+            @click="closeTableTabs(menuTableTab, 'left')"
+          >
+            Close tabs to the left
+          </button>
+          <button
+            class="overflow-menu-item"
+            type="button"
+            role="menuitem"
+            :disabled="!tableTabsBeside(menuTableTab, 'right').length"
+            @click="closeTableTabs(menuTableTab, 'right')"
+          >
+            Close tabs to the right
+          </button>
+        </div>
+        <div
+          v-if="filterPopover && popoverFilters"
+          ref="filterPopoverEl"
+          class="tab-filter-popover"
+          role="tooltip"
+          :style="{ left: `${filterPopover.position.left}px`, top: `${filterPopover.position.top}px` }"
+        >
+          <div class="tab-filter-popover-title muted tiny">
+            {{ popoverFilters.count }} {{ popoverFilters.count === 1 ? "filter" : "filters" }} applied
+          </div>
+          <FilterPreview v-if="popoverFilters.preview" :group="popoverFilters.preview" />
         </div>
       </Teleport>
       <Modal v-if="saveDialog" title="Save query" @close="closeSaveDialog">
