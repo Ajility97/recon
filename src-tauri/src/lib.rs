@@ -58,6 +58,7 @@ pub fn run() {
             commands::save_connection,
             commands::remove_connection,
             commands::reorder_connections,
+            commands::move_connection,
             commands::save_query,
             commands::delete_saved_query,
             commands::has_saved_password,

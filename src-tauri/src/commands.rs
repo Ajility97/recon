@@ -433,6 +433,26 @@ pub fn reorder_connections(
 }
 
 #[tauri::command]
+pub fn move_connection(
+    app: AppHandle,
+    state: State<AppState>,
+    connection_id: String,
+    group_id: Option<String>,
+    connection_ids: Vec<String>,
+) -> Result<(), String> {
+    let mut data = lock(&state)?;
+    let mut next = data.clone();
+    let entry = take_connection(&mut next, &connection_id)
+        .ok_or_else(|| "Connection not found".to_string())?;
+    let list = connection_list_mut(&mut next, group_id.as_deref())?;
+    list.push(entry);
+    reorder_by_ids(list, connection_ids, |entry| &entry.id, "Connection")?;
+    persist::save(&app, &next)?;
+    *data = next;
+    Ok(())
+}
+
+#[tauri::command]
 pub fn save_query(
     app: AppHandle,
     state: State<AppState>,

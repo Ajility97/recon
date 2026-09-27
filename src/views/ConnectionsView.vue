@@ -2,6 +2,7 @@
 import { computed, ref } from "vue";
 import { useApp } from "../composables/useApp";
 import { useConnectionForm } from "../composables/useConnectionForm";
+import { STANDALONE_LIST, useConnectionDrag } from "../composables/useConnectionDrag";
 import { alphabeticalIds, useDragReorder } from "../composables/useDragReorder";
 import type { ConnectionGroup } from "../types";
 import ConnectionGroupCard from "../components/ConnectionGroupCard.vue";
@@ -21,6 +22,7 @@ const {
   setAllGroupsExpanded,
   reorderGroups,
   reorderConnections,
+  moveConnection,
   showToast,
 } = useApp();
 const { openNewConnection } = useConnectionForm();
@@ -42,17 +44,23 @@ const groupReorder = useDragReorder({
   },
 });
 
-const standaloneReorder = useDragReorder({
-  ids: standaloneIds,
-  selector: "[data-connection-id]",
-  datasetKey: "connectionId",
-  bodyClass: "reordering-repos",
-  commit: (ids) => reorderConnections(null, ids),
+const connectionDrag = useConnectionDrag({
+  groups,
+  standalone: standaloneConnections,
+  commit: moveConnection,
+  onError: (err) => showToast(String(err), "error"),
 });
 
 const visibleGroups = computed(() => groupReorder.ordered(groups.value));
-const visibleStandalone = computed(() => standaloneReorder.ordered(standaloneConnections.value));
+const visibleStandalone = computed(() =>
+  connectionDrag.connectionsFor(STANDALONE_LIST, standaloneConnections.value),
+);
 const visibleStandaloneIds = computed(() => visibleStandalone.value.map((item) => item.id));
+const draggingConnectionId = computed(() => connectionDrag.draggingId.value);
+const showStandaloneList = computed(() => standaloneConnections.value.length > 0);
+const showUngroupZone = computed(
+  () => !showStandaloneList.value && Boolean(draggingConnectionId.value),
+);
 
 const isEmpty = computed(() => !groups.value.length && !standaloneConnections.value.length);
 const hasGroups = computed(() => groups.value.length > 0);
@@ -60,6 +68,7 @@ const canExpandAll = computed(() => groups.value.some((group) => !group.expanded
 const canCollapseAll = computed(() => groups.value.some((group) => group.expanded));
 const canSortGroups = computed(() => groups.value.length > 1);
 const canSortStandalone = computed(() => standaloneConnections.value.length > 1);
+const canDragConnections = computed(() => hasGroups.value || canSortStandalone.value);
 
 const canSortGroupsAlpha = computed(
   () => canSortGroups.value && alphabeticalIds(groups.value).join("\0") !== groupIds().join("\0"),
@@ -141,9 +150,14 @@ async function sortAlphabetically() {
         </p>
 
         <div
-          v-if="standaloneConnections.length"
+          v-if="showStandaloneList || showUngroupZone"
           class="standalone-list"
-          :class="{ reordering: Boolean(standaloneReorder.draggingId.value) }"
+          :class="{
+            reordering: connectionDrag.draftKey.value === STANDALONE_LIST,
+            trailing: showUngroupZone,
+            'drop-target': connectionDrag.dropKey.value === STANDALONE_LIST,
+          }"
+          :data-connection-drop="STANDALONE_LIST"
         >
           <ConnectionRow
             v-for="connection in visibleStandalone"
@@ -152,10 +166,13 @@ async function sortAlphabetically() {
             :group-id="null"
             :sibling-ids="visibleStandaloneIds"
             flush
-            :sortable="canSortStandalone"
-            :dragging="standaloneReorder.draggingId.value === connection.id"
-            @reorder-start="standaloneReorder.start"
+            :sortable="canDragConnections"
+            :dragging="draggingConnectionId === connection.id"
+            @reorder-start="connectionDrag.start"
           />
+          <p v-if="!visibleStandalone.length" class="muted tiny standalone-drop-hint">
+            Drop here to remove from group
+          </p>
         </div>
 
         <div class="groups-list" :class="{ reordering: Boolean(groupReorder.draggingId.value) }">
@@ -172,7 +189,12 @@ async function sortAlphabetically() {
             :group="group"
             :sortable="canSortGroups"
             :dragging="groupReorder.draggingId.value === group.id"
+            :connections="connectionDrag.connectionsFor(group.id, group.connections)"
+            :connections-sortable="canDragConnections"
+            :dragging-connection-id="draggingConnectionId"
+            :drop-target="connectionDrag.dropKey.value === group.id"
             @reorder-start="groupReorder.start"
+            @connection-drag-start="connectionDrag.start"
           />
         </div>
       </div>

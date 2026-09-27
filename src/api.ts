@@ -67,6 +67,14 @@ export function reorderConnections(groupId: string | null, connectionIds: string
   return invoke<void>("reorder_connections", { groupId, connectionIds });
 }
 
+export function moveConnection(
+  connectionId: string,
+  groupId: string | null,
+  connectionIds: string[],
+) {
+  return invoke<void>("move_connection", { connectionId, groupId, connectionIds });
+}
+
 export function saveQuery(query: SavedQuery) {
   return invoke<SavedQuery>("save_query", { query });
 }

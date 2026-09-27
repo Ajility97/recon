@@ -316,6 +316,46 @@ export function useApp() {
     }
   }
 
+  async function moveConnection(
+    connectionId: string,
+    groupId: string | null,
+    connectionIds: string[],
+  ) {
+    const current = findConnection(connectionId);
+    if (!current) {
+      throw new Error("Connection not found.");
+    }
+    if ((current.group?.id ?? null) === groupId) {
+      return reorderConnections(groupId, connectionIds);
+    }
+    const target = groupId
+      ? groups.value.find((group) => group.id === groupId)?.connections
+      : standaloneConnections.value;
+    if (!target) {
+      throw new Error("Group not found.");
+    }
+    const byId = new Map([...target, current.connection].map((item) => [item.id, item]));
+    if (connectionIds.length !== byId.size || connectionIds.some((id) => !byId.has(id))) {
+      throw new Error("Connection list does not match saved connections.");
+    }
+    const previousGroups = groups.value;
+    const previousStandalone = standaloneConnections.value;
+    removeLocally(connectionId);
+    const next = connectionIds.map((id) => byId.get(id)!);
+    if (groupId) {
+      patchGroup(groupId, { connections: next });
+    } else {
+      standaloneConnections.value = next;
+    }
+    try {
+      await api.moveConnection(connectionId, groupId, connectionIds);
+    } catch (err) {
+      groups.value = previousGroups;
+      standaloneConnections.value = previousStandalone;
+      throw err;
+    }
+  }
+
   return {
     groups,
     standaloneConnections,
@@ -352,6 +392,7 @@ export function useApp() {
     saveConnection,
     removeConnection,
     reorderConnections,
+    moveConnection,
     saveQuery,
     deleteSavedQuery,
   };

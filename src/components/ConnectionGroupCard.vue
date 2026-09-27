@@ -3,11 +3,11 @@ import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { useApp } from "../composables/useApp";
 import { useConnectionForm } from "../composables/useConnectionForm";
-import { alphabeticalIds, useDragReorder } from "../composables/useDragReorder";
+import { alphabeticalIds } from "../composables/useDragReorder";
 import { useOverflowMenu } from "../composables/useOverflowMenu";
 import { useTabs } from "../composables/useTabs";
 import { contrastingText, DEFAULT_HEADER_COLOR } from "../color";
-import type { ConnectionGroup } from "../types";
+import type { ConnectionEntry, ConnectionGroup } from "../types";
 import ConnectionRow from "./ConnectionRow.vue";
 
 const props = defineProps<{
@@ -15,12 +15,17 @@ const props = defineProps<{
   draft?: boolean;
   sortable?: boolean;
   dragging?: boolean;
+  connections?: ConnectionEntry[];
+  connectionsSortable?: boolean;
+  draggingConnectionId?: string | null;
+  dropTarget?: boolean;
 }>();
 
 const emit = defineEmits<{
   created: [];
   cancel: [];
   reorderStart: [event: PointerEvent, groupId: string];
+  connectionDragStart: [event: PointerEvent, connectionId: string];
 }>();
 
 const { toggleGroup, createGroup, updateGroup, deleteGroup, reorderConnections, showToast } =
@@ -34,19 +39,15 @@ const {
 } = useOverflowMenu(() => `group:${props.group.id}`);
 
 const connectionIds = () => props.group.connections.map((connection) => connection.id);
-const reorder = useDragReorder({
-  ids: connectionIds,
-  selector: "[data-connection-id]",
-  datasetKey: "connectionId",
-  bodyClass: "reordering-repos",
-  commit: (ids) => reorderConnections(props.group.id, ids),
-});
-const visibleConnections = computed(() => reorder.ordered(props.group.connections));
+const visibleConnections = computed(() => props.connections ?? props.group.connections);
 const siblingIds = computed(() => visibleConnections.value.map((connection) => connection.id));
-const canSort = computed(() => !props.draft && props.group.connections.length > 1);
+const reorderingConnections = computed(
+  () => Boolean(props.draggingConnectionId) && siblingIds.value.includes(props.draggingConnectionId!),
+);
 const canSortAlpha = computed(
   () =>
-    canSort.value &&
+    !props.draft &&
+    props.group.connections.length > 1 &&
     alphabeticalIds(props.group.connections).join("\0") !== connectionIds().join("\0"),
 );
 
@@ -176,8 +177,9 @@ function onHeaderClick(event: MouseEvent) {
 <template>
   <section
     class="group"
-    :class="{ dragging, sortable }"
+    :class="{ dragging, sortable, 'drop-target': dropTarget }"
     :data-group-id="draft ? undefined : group.id"
+    :data-connection-drop="draft ? undefined : group.id"
   >
     <div
       class="group-header"
@@ -225,7 +227,7 @@ function onHeaderClick(event: MouseEvent) {
           @keydown.escape="cancelRename"
         />
         <span v-else class="group-title">{{ group.name }}</span>
-        <span v-if="!renaming" class="group-count">{{ group.connections.length }}</span>
+        <span v-if="!renaming" class="group-count">{{ visibleConnections.length }}</span>
         <label v-if="renaming" class="color-picker">
           <span class="color-picker-label">Color</span>
           <span class="color-picker-swatch" aria-hidden="true">
@@ -291,9 +293,9 @@ function onHeaderClick(event: MouseEvent) {
     </div>
 
     <div
-      v-if="group.expanded && group.connections.length"
+      v-if="group.expanded && visibleConnections.length"
       class="group-body"
-      :class="{ reordering: Boolean(reorder.draggingId.value) }"
+      :class="{ reordering: reorderingConnections }"
     >
       <ConnectionRow
         v-for="connection in visibleConnections"
@@ -301,9 +303,9 @@ function onHeaderClick(event: MouseEvent) {
         :connection="connection"
         :group-id="group.id"
         :sibling-ids="siblingIds"
-        :sortable="canSort"
-        :dragging="reorder.draggingId.value === connection.id"
-        @reorder-start="reorder.start"
+        :sortable="connectionsSortable"
+        :dragging="draggingConnectionId === connection.id"
+        @reorder-start="(event, id) => emit('connectionDragStart', event, id)"
       />
     </div>
     <p v-else-if="group.expanded && !draft" class="muted tiny group-empty">

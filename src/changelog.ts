@@ -16,6 +16,7 @@ export const CHANGELOG: ChangelogRelease[] = [
       "PostgreSQL exports include sequences that column defaults use even when no exported table owns them, and keep each sequence's settings and current position.",
       "Views that read from other views are exported in an order that imports cleanly.",
       "Importing a PostgreSQL export over an earlier import of it no longer fails when one table's default uses another table's sequence.",
+      "Drag a connection by its handle to move it into another group, onto a collapsed group, or out of its group. If none of your connections are outside a group, a drop area appears below the groups while you drag.",
     ],
   },
   {
