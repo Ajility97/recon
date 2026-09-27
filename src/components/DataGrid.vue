@@ -48,7 +48,7 @@ const emit = defineEmits<{
   edit: [row: number, col: number, text: string];
   setNull: [cells: CellPosition[]];
   create: [];
-  follow: [row: number, col: number];
+  follow: [row: number, col: number, options?: { side?: boolean }];
   cellMenu: [row: number, col: number, event: MouseEvent];
   headerMenu: [col: number, event: MouseEvent];
 }>();
@@ -246,9 +246,9 @@ function linkTarget(value: RowValues[number] | undefined, col: number) {
   return value === null || value === undefined || isBytes(value) ? null : (props.links?.[col] ?? null);
 }
 
-function follow(row: number, col: number) {
+function follow(row: number, col: number, event?: MouseEvent) {
   commitEdit();
-  emit("follow", row, col);
+  emit("follow", row, col, { side: Boolean(event?.altKey) });
 }
 
 function isAutoColumn(row: number, col: number) {
@@ -722,11 +722,11 @@ defineExpose({ scrollToTop, commitEdit, editCell });
                 class="grid-link"
                 type="button"
                 tabindex="-1"
-                :title="`Open ${linkTarget(value, col)} = ${cellDisplay(value)}`"
+                :title="`Open ${linkTarget(value, col)} = ${cellDisplay(value)} · Option-click to open beside`"
                 :aria-label="`Open ${linkTarget(value, col)} = ${cellDisplay(value)}`"
                 @mousedown.stop.prevent
                 @dblclick.stop
-                @click.stop="follow(item.index, col)"
+                @click.stop="follow(item.index, col, $event)"
               >
                 <svg viewBox="0 0 16 16" aria-hidden="true">
                   <path d="M3 8h9.5M8.5 4l4 4-4 4" />

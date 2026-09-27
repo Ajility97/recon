@@ -76,7 +76,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   changes: [rows: number];
-  follow: [link: TableLink];
+  follow: [link: TableLink, options?: { side?: boolean }];
   "update:view": [patch: Partial<TableViewState>];
   filterState: [state: { count: number; summary: string; preview: FilterPreviewGroup | null }];
   openSql: [sql: string];
@@ -553,7 +553,7 @@ function onSort(column: string) {
   emit("update:view", { sort });
 }
 
-function onFollow(row: number, col: number) {
+function onFollow(row: number, col: number, options?: { side?: boolean }) {
   const key = foreignKeyByColumn.value.get(columns.value[col]?.name ?? "");
   const values = displayRows.value[row];
   if (!key || !values) {
@@ -568,8 +568,24 @@ function onFollow(row: number, col: number) {
     }
     filter.push({ column: key.refColumns[index], value });
   }
-  emit("follow", { namespace: key.refNamespace || namespace.value, table: key.refTable, filter });
+  emit("follow", { namespace: key.refNamespace || namespace.value, table: key.refTable, filter }, options);
 }
+
+function followFromMenu(side = false) {
+  if (!cellMenu.value) {
+    return;
+  }
+  onFollow(cellMenu.value.row, cellMenu.value.col, { side });
+  closeGridMenus();
+}
+
+const menuHasLink = computed(() => {
+  if (!cellMenu.value) {
+    return false;
+  }
+  const name = columns.value[cellMenu.value.col]?.name;
+  return Boolean(name && foreignKeyByColumn.value.has(name));
+});
 
 function parseInput(text: string, reference: Cell, column: ColumnMeta): Cell {
   const trimmed = text.trim();
@@ -1397,6 +1413,15 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
           >
             Filter where {{ menuColumn?.name ?? "column" }} is not NULL
           </button>
+          <template v-if="menuHasLink">
+            <div class="overflow-menu-divider" role="separator" />
+            <button class="overflow-menu-item" type="button" role="menuitem" @click="followFromMenu(false)">
+              Open related table
+            </button>
+            <button class="overflow-menu-item" type="button" role="menuitem" @click="followFromMenu(true)">
+              Open to the side
+            </button>
+          </template>
         </template>
         <template v-else>
           <button class="overflow-menu-item" type="button" role="menuitem" :disabled="!menuColumn" @click="filterOnColumn">

@@ -38,7 +38,36 @@ import QueryEditor from "./QueryEditor.vue";
 import QueryHistory from "./QueryHistory.vue";
 import RestoreDialog from "./RestoreDialog.vue";
 import SavedQueries from "./SavedQueries.vue";
+import SplitWorkspace from "./SplitWorkspace.vue";
+import TablePaneFrame, { type PaneTabInfo } from "./TablePaneFrame.vue";
 import TableView from "./TableView.vue";
+import {
+  activateTab,
+  addTabToPane,
+  canSplit,
+  defaultSizesFor,
+  dropEdge,
+  edgeToDirection,
+  emptyPane,
+  emptyWorkspace,
+  findPane,
+  focusedActiveTabId,
+  focusPane,
+  MAX_PANES,
+  mergeAllPanes,
+  moveTab,
+  nextSplitDirection,
+  nodeAtPath,
+  paneForTab,
+  removePane,
+  removeTabFromWorkspace,
+  restoreWorkspace,
+  splitFocused,
+  updateSplitSizes,
+  type DropEdge,
+  type SplitDirection,
+  type TableWorkspace,
+} from "../workspace/split";
 
 /** Table tab ids are opaque, so several tabs can show the same table with different filters. */
 type TableTab = { id: string; kind: "table" } & TableViewState;
@@ -93,9 +122,14 @@ const filter = ref("");
 const schema = shallowRef<SQLNamespace>({});
 const tabs = ref<PaneTab[]>([]);
 const view = ref<ConnectionViewTab>("tables");
-const activeTableTabId = ref("");
+const workspace = ref<TableWorkspace>(emptyWorkspace());
 const activeQueryTabId = ref("");
 const tabsRestored = ref(false);
+const splitHost = ref<HTMLElement | null>(null);
+const flashPaneId = ref("");
+let flashPaneTimer = 0;
+const draggingTabId = ref("");
+const dropTarget = ref<{ paneId: string; afterId?: string; edge?: DropEdge } | null>(null);
 const dirtyTabs = ref(new Map<string, number>());
 const filteredTabs = ref(new Map<string, FilterIndicator>());
 const filterPopover = ref<{ tabId: string; anchor: DOMRect } | null>(null);
@@ -113,6 +147,16 @@ const nameBusy = ref(false);
 const nameInput = ref<HTMLInputElement | null>(null);
 const sidebarEl = ref<HTMLElement | null>(null);
 const subtabBar = ref<HTMLElement | null>(null);
+
+const activeTableTabId = computed({
+  get: () => focusedActiveTabId(workspace.value),
+  set: (id: string) => {
+    if (!id) {
+      return;
+    }
+    workspace.value = activateTab(workspace.value, id);
+  },
+});
 const selectedTables = ref(new Set<string>());
 const tableMenu = ref<{ x: number; y: number; tables: string[] } | null>(null);
 const tableMenuEl = ref<HTMLElement | null>(null);
@@ -227,6 +271,7 @@ const tableTitleSuffix = computed(() => {
   return suffix;
 });
 
+const queryTabs = computed(() => tabs.value.filter((tab): tab is QueryTab => tab.kind === "query"));
 const viewTabs = computed(() => {
   if (view.value === "history") {
     return [];
@@ -334,6 +379,10 @@ function saveTableTabs() {
   }
   const saved = {
     active: activeTableTabId.value,
+    focusedPaneId: workspace.value.focusedPaneId,
+    twoPaneAxis: workspace.value.twoPaneAxis,
+    layout: workspace.value.layout,
+    panes: workspace.value.panes,
     tabs: tabs.value.flatMap((tab) =>
       tab.kind === "table"
         ? [
@@ -391,7 +440,7 @@ function restoredTableTab(value: unknown): TableTab | null {
 }
 
 function restoreTableTabs() {
-  let saved: { active?: unknown; tabs?: unknown } = {};
+  let saved: Record<string, unknown> = {};
   try {
     saved = JSON.parse(localStorage.getItem(tableTabsKey.value) ?? "{}") ?? {};
   } catch {
@@ -402,7 +451,16 @@ function restoreTableTabs() {
     .filter((tab): tab is TableTab => tab !== null);
   tabs.value = [...tabs.value, ...restored];
   const active = restored.find((tab) => tab.id === saved.active) ?? restored[0];
-  activeTableTabId.value = active?.id ?? "";
+  workspace.value = restoreWorkspace(
+    {
+      layout: saved.layout,
+      panes: saved.panes,
+      focusedPaneId: saved.focusedPaneId,
+      twoPaneAxis: saved.twoPaneAxis,
+    },
+    restored.map((tab) => tab.id),
+    active?.id ?? "",
+  );
 }
 
 function openQueryTab(initialSql?: string) {
@@ -639,12 +697,15 @@ function mostRecentTab(list: TableTab[]) {
 }
 
 /** Adds a table tab right after `afterId`, or at the end, and focuses it. */
-function insertTableTab(tab: TableTab, afterId?: string) {
+function insertTableTab(tab: TableTab, afterId?: string, paneId?: string) {
   const next = [...tabs.value];
   const index = afterId ? next.findIndex((item) => item.id === afterId) : -1;
   next.splice(index >= 0 ? index + 1 : next.length, 0, tab);
   tabs.value = next;
-  activeTableTabId.value = tab.id;
+  const target = paneId && findPane(workspace.value, paneId) ? paneId : workspace.value.focusedPaneId;
+  const pane = findPane(workspace.value, target);
+  const afterInPane = afterId && pane?.tabIds.includes(afterId) ? afterId : undefined;
+  workspace.value = addTabToPane(workspace.value, target, tab.id, afterInPane);
   scheduleSaveTableTabs();
   flashTab(tab.id);
 }
@@ -673,8 +734,9 @@ function flashTab(id: string) {
     flashTabId.value = "";
   }, TAB_FLASH_MS);
   void nextTick(() => {
-    const strip = subtabBar.value;
-    const tab = strip?.querySelector<HTMLElement>(`[data-tab-id="${CSS.escape(id)}"]`);
+    const root = view.value === "sql" ? subtabBar.value : splitHost.value;
+    const tab = root?.querySelector<HTMLElement>(`[data-tab-id="${CSS.escape(id)}"]`);
+    const strip = tab?.closest(".subtab-bar");
     if (!strip || !tab) {
       return;
     }
@@ -688,6 +750,14 @@ function flashTab(id: string) {
   });
 }
 
+function flashPane(id: string) {
+  flashPaneId.value = id;
+  window.clearTimeout(flashPaneTimer);
+  flashPaneTimer = window.setTimeout(() => {
+    flashPaneId.value = "";
+  }, TAB_FLASH_MS);
+}
+
 /**
  * Focuses the most recently used tab on `table`, unless `newTab` asks for
  * another view of it. A new tab goes after the table's other tabs, or after
@@ -695,10 +765,21 @@ function flashTab(id: string) {
  */
 function openTable(table: TableInfo, newTab = false, atEnd = false) {
   const existing = tabsForTable(namespace.value, table.name);
-  const recent = newTab ? undefined : mostRecentTab(existing);
-  if (recent) {
-    activeTableTabId.value = recent.id;
-    return false;
+  if (!newTab) {
+    const focused = findPane(workspace.value, workspace.value.focusedPaneId);
+    const inFocused = existing.filter((tab) => focused?.tabIds.includes(tab.id));
+    const recentFocused = mostRecentTab(inFocused);
+    if (recentFocused) {
+      workspace.value = activateTab(workspace.value, recentFocused.id);
+      scheduleSaveTableTabs();
+      return false;
+    }
+    const recent = mostRecentTab(existing);
+    if (recent) {
+      workspace.value = activateTab(workspace.value, recent.id);
+      scheduleSaveTableTabs();
+      return false;
+    }
   }
   insertTableTab(
     newTableTab(namespace.value, table.name, table.kind),
@@ -758,9 +839,13 @@ function closeTableTab(tab: TableTab) {
 
 type CloseScope = "others" | "left" | "right";
 
-/** Table tabs beside `tab` in tab-bar order. */
+/** Table tabs beside `tab` in this pane's tab-bar order. */
 function tableTabsBeside(tab: TableTab, scope: CloseScope) {
-  const list = tabs.value.filter((item): item is TableTab => item.kind === "table");
+  const pane = paneForTab(workspace.value, tab.id);
+  const list = (pane?.tabIds ?? []).flatMap((id) => {
+    const item = tabs.value.find((entry): entry is TableTab => entry.id === id && entry.kind === "table");
+    return item ? [item] : [];
+  });
   const index = list.findIndex((item) => item.id === tab.id);
   if (scope === "left") {
     return list.slice(0, index);
@@ -926,10 +1011,14 @@ function openTabMenu(event: MouseEvent, tab: PaneTab) {
   fitMenu(tabMenu, tabMenuEl);
 }
 
-function runTableAction(action: "open" | "openNew" | "query" | "copy" | "export") {
+function runTableAction(action: "open" | "openNew" | "openSide" | "query" | "copy" | "export") {
   const chosen = tableMenu.value?.tables ?? [];
-  closeMenus();
   const table = tables.value.find((item) => item.name === chosen[0]);
+  if (action === "openSide" && table) {
+    openTableToTheSide(table);
+    return;
+  }
+  closeMenus();
   if (!table) {
     return;
   }
@@ -995,32 +1084,403 @@ watch(tables, (list) => {
  * Reuses a tab on the target table only when that tab has no filters or its
  * filter also came from an arrow, so filters the user built are never replaced.
  */
-function followLink(link: TableLink) {
+function onTableFollow(link: TableLink, options?: { side?: boolean }) {
+  followLink(link, Boolean(options?.side));
+}
+
+function followLink(link: TableLink, side = false) {
   const filter = linkFilter(link.filter);
   view.value = "tables";
+  if (side) {
+    followLinkToSide(link, filter);
+    return;
+  }
+  const focused = findPane(workspace.value, workspace.value.focusedPaneId);
   const reusable = mostRecentTab(
-    tabsForTable(link.namespace, link.table).filter((tab) => tab.origin === "link" || !hasConditions(tab.filter)),
+    tabsForTable(link.namespace, link.table).filter(
+      (tab) =>
+        Boolean(focused?.tabIds.includes(tab.id)) && (tab.origin === "link" || !hasConditions(tab.filter)),
+    ),
   );
   if (reusable) {
     updateView(reusable.id, { filter, origin: "link" });
-    activeTableTabId.value = reusable.id;
+    workspace.value = activateTab(workspace.value, reusable.id);
+    scheduleSaveTableTabs();
     return;
   }
-  const known = link.namespace === namespace.value
-    ? tables.value.find((table) => table.name === link.table)
-    : undefined;
+  const known =
+    link.namespace === namespace.value ? tables.value.find((table) => table.name === link.table) : undefined;
   insertTableTab(
     newTableTab(link.namespace, link.table, known?.kind ?? "table", { filter, origin: "link" }),
-    activeTableTabId.value,
+    focused?.activeTabId,
   );
+}
+
+function followLinkToSide(link: TableLink, filter: ReturnType<typeof linkFilter>) {
+  if (!ensureCanSplit(nextSplitDirection(workspace.value) ?? "right")) {
+    followLink(link, false);
+    return;
+  }
+  const known =
+    link.namespace === namespace.value ? tables.value.find((table) => table.name === link.table) : undefined;
+  const tab = newTableTab(link.namespace, link.table, known?.kind ?? "table", { filter, origin: "link" });
+  openTabInNewPane(tab, nextSplitDirection(workspace.value) ?? "right");
 }
 
 function selectTab(tab: PaneTab) {
   if (tab.kind === "query") {
     activeQueryTabId.value = tab.id;
   } else {
-    activeTableTabId.value = tab.id;
+    workspace.value = activateTab(workspace.value, tab.id);
+    scheduleSaveTableTabs();
   }
+}
+
+function splitToast(reason: "max" | "size") {
+  showToast(
+    reason === "max"
+      ? "The workspace can show 6 tables at once. Close a pane to split again."
+      : "This window is too small to add another table pane.",
+  );
+}
+
+function ensureCanSplit(direction: SplitDirection): boolean {
+  const count = workspace.value.panes.length;
+  if (count >= MAX_PANES) {
+    splitToast("max");
+    return false;
+  }
+  const width = splitHost.value?.clientWidth ?? 0;
+  const height = splitHost.value?.clientHeight ?? 0;
+  const check = canSplit(width, height, count, direction);
+  if (!check.ok) {
+    splitToast(check.reason);
+    return false;
+  }
+  return true;
+}
+
+function openTabInNewPane(tab: TableTab, direction: SplitDirection) {
+  const focused = findPane(workspace.value, workspace.value.focusedPaneId);
+  if (!focused?.tabIds.length) {
+    insertTableTab(tab);
+    return;
+  }
+  tabs.value = [...tabs.value, tab];
+  const pane = emptyPane([tab.id], tab.id);
+  const result = splitFocused(workspace.value, pane, direction);
+  if ("error" in result) {
+    workspace.value = addTabToPane(workspace.value, workspace.value.focusedPaneId, tab.id);
+  } else {
+    workspace.value = result;
+    flashPane(pane.id);
+  }
+  scheduleSaveTableTabs();
+  flashTab(tab.id);
+}
+
+function openTableToTheSide(table: TableInfo) {
+  closeMenus();
+  const existing = tabsForTable(namespace.value, table.name);
+  const focusedId = workspace.value.focusedPaneId;
+  const elsewhere = existing.filter((tab) => paneForTab(workspace.value, tab.id)?.id !== focusedId);
+  const recentElse = mostRecentTab(elsewhere);
+  if (recentElse) {
+    workspace.value = activateTab(workspace.value, recentElse.id);
+    scheduleSaveTableTabs();
+    flashTab(recentElse.id);
+    return;
+  }
+  const direction = nextSplitDirection(workspace.value) ?? "right";
+  if (!ensureCanSplit(direction)) {
+    return;
+  }
+  openTabInNewPane(newTableTab(namespace.value, table.name, table.kind), direction);
+}
+
+function splitTableTab(tab: TableTab, direction: SplitDirection) {
+  closeMenus();
+  workspace.value = activateTab(workspace.value, tab.id);
+  if (!ensureCanSplit(direction)) {
+    return;
+  }
+  const copy: TableTab = {
+    ...tab,
+    id: `table:${newId("")}`,
+    filter: cloneNode(tab.filter),
+    origin: "user",
+    title: undefined,
+    panelOpen: false,
+  };
+  openTabInNewPane(copy, direction);
+}
+
+function closeWorkspacePane(paneId: string) {
+  closeMenus();
+  if (!paneId || workspace.value.panes.length <= 1) {
+    return;
+  }
+  workspace.value = removePane(workspace.value, paneId, true);
+  scheduleSaveTableTabs();
+}
+
+function mergeWorkspacePanes() {
+  closeMenus();
+  if (workspace.value.panes.length <= 1) {
+    return;
+  }
+  workspace.value = mergeAllPanes(workspace.value, activeTableTabId.value);
+  scheduleSaveTableTabs();
+}
+
+function moveMenuTabToPane(paneId: string) {
+  const tab = menuTableTab.value;
+  closeMenus();
+  if (!tab) {
+    return;
+  }
+  workspace.value = moveTab(workspace.value, tab.id, paneId);
+  scheduleSaveTableTabs();
+  flashTab(tab.id);
+}
+
+function onFocusPane(paneId: string) {
+  if (workspace.value.focusedPaneId === paneId) {
+    return;
+  }
+  workspace.value = focusPane(workspace.value, paneId);
+  scheduleSaveTableTabs();
+}
+
+function onSplitResize(path: number[], sizes: [number, number]) {
+  workspace.value = { ...workspace.value, layout: updateSplitSizes(workspace.value.layout, path, sizes) };
+  scheduleSaveTableTabs();
+}
+
+function onSplitReset(path: number[]) {
+  const node = nodeAtPath(workspace.value.layout, path);
+  const sizes = node ? defaultSizesFor(node) : null;
+  if (!sizes) {
+    return;
+  }
+  workspace.value = { ...workspace.value, layout: updateSplitSizes(workspace.value.layout, path, sizes) };
+  scheduleSaveTableTabs();
+}
+
+function tabInfo(tab: TableTab, preview = false): PaneTabInfo {
+  const filtered = filteredTabs.value.get(tab.id);
+  return {
+    id: tab.id,
+    title: tabTitle(tab),
+    tooltip: preview ? `${tabTitle(tab)} · drop to move here` : filterPopover.value?.tabId === tab.id ? "" : tabTooltip(tab),
+    dirty: dirtyTabs.value.has(tab.id),
+    filtered: filtered ? { count: filtered.count, summary: filtered.summary } : undefined,
+    flash: !preview && flashTabId.value === tab.id,
+    preview,
+  };
+}
+
+function paneTabInfos(paneId: string): PaneTabInfo[] {
+  const pane = findPane(workspace.value, paneId);
+  const infos = (pane?.tabIds ?? []).flatMap((id) => {
+    const tab = tabs.value.find((item): item is TableTab => item.id === id && item.kind === "table");
+    return tab ? [tabInfo(tab)] : [];
+  });
+  const preview = dropPreviewTab.value;
+  if (preview && dropHoverPaneId.value === paneId && !infos.some((item) => item.id === preview.id)) {
+    infos.push(tabInfo(preview, true));
+  }
+  return infos;
+}
+
+const dropHoverPaneId = computed(() => {
+  const target = dropTarget.value;
+  const dragging = draggingTabId.value;
+  if (!target || !dragging || target.edge) {
+    return "";
+  }
+  const source = paneForTab(workspace.value, dragging);
+  return source && source.id !== target.paneId ? target.paneId : "";
+});
+
+const dropPreviewTab = computed(() => {
+  const id = draggingTabId.value;
+  if (!id || !dropHoverPaneId.value) {
+    return null;
+  }
+  const tab = tabs.value.find((item): item is TableTab => item.id === id && item.kind === "table");
+  return tab ?? null;
+});
+
+const dragTableTab = computed(() => {
+  const id = draggingTabId.value;
+  if (!id) {
+    return null;
+  }
+  return tabs.value.find((item): item is TableTab => item.id === id && item.kind === "table") ?? null;
+});
+
+function tableTabsInPane(paneId: string): TableTab[] {
+  const pane = findPane(workspace.value, paneId);
+  return (pane?.tabIds ?? []).flatMap((id) => {
+    const tab = tabs.value.find((item): item is TableTab => item.id === id && item.kind === "table");
+    return tab ? [tab] : [];
+  });
+}
+
+function otherPanes(exceptPaneId?: string) {
+  const skip = exceptPaneId ?? (menuTableTab.value ? paneForTab(workspace.value, menuTableTab.value.id)?.id : "");
+  return workspace.value.panes.filter((pane) => pane.id !== skip).map((pane) => {
+    const tab = tabs.value.find((item) => item.id === pane.activeTabId);
+    return { id: pane.id, label: tab ? tabTitle(tab) : "Pane" };
+  });
+}
+
+function paneFromPoint(x: number, y: number): { paneId: string; edge?: DropEdge } | null {
+  const node = document.elementFromPoint(x, y);
+  if (!(node instanceof Element)) {
+    return null;
+  }
+  const preview = node.closest<HTMLElement>("[data-drop-edge]");
+  if (preview?.dataset.paneId && preview.dataset.dropEdge) {
+    return { paneId: preview.dataset.paneId, edge: preview.dataset.dropEdge as DropEdge };
+  }
+  const frame = node.closest<HTMLElement>("[data-pane-id]");
+  if (frame?.dataset.paneId) {
+    return { paneId: frame.dataset.paneId };
+  }
+  const sash = node.closest(".split-sash");
+  if (!(sash instanceof HTMLElement)) {
+    return null;
+  }
+  const prev = sash.previousElementSibling?.querySelector<HTMLElement>("[data-pane-id]");
+  const next = sash.nextElementSibling?.querySelector<HTMLElement>("[data-pane-id]");
+  const box = sash.getBoundingClientRect();
+  if (sash.classList.contains("axis-x")) {
+    return x < box.left + box.width / 2
+      ? prev?.dataset.paneId
+        ? { paneId: prev.dataset.paneId, edge: "right" }
+        : null
+      : next?.dataset.paneId
+        ? { paneId: next.dataset.paneId, edge: "left" }
+        : null;
+  }
+  return y < box.top + box.height / 2
+    ? prev?.dataset.paneId
+      ? { paneId: prev.dataset.paneId, edge: "down" }
+      : null
+    : next?.dataset.paneId
+      ? { paneId: next.dataset.paneId, edge: "up" }
+      : null;
+}
+
+function onTabPointerDown(event: PointerEvent, tabId: string) {
+  if (event.button !== 0 || renamingTabId.value) {
+    return;
+  }
+  const startX = event.clientX;
+  const startY = event.clientY;
+  let started = false;
+
+  const onMove = (move: PointerEvent) => {
+    if (!started) {
+      if (Math.hypot(move.clientX - startX, move.clientY - startY) < 6) {
+        return;
+      }
+      started = true;
+      draggingTabId.value = tabId;
+      document.body.classList.add("dragging-tab");
+    }
+    const hit = paneFromPoint(move.clientX, move.clientY);
+    if (!hit) {
+      dropTarget.value = null;
+      return;
+    }
+    const { paneId } = hit;
+    const source = paneForTab(workspace.value, tabId);
+    const canEdge = workspace.value.panes.length < MAX_PANES;
+    const frame = splitHost.value?.querySelector<HTMLElement>(`[data-pane-id="${CSS.escape(paneId)}"]`);
+    const edge =
+      hit.edge ??
+      (canEdge && frame ? dropEdge(frame.getBoundingClientRect(), move.clientX, move.clientY) : null);
+    const splitOwnPane = source?.id === paneId && (source?.tabIds.length ?? 0) > 1;
+    if (edge && canEdge && (source?.id !== paneId || splitOwnPane)) {
+      dropTarget.value = { paneId, edge };
+      return;
+    }
+    if (source?.id !== paneId) {
+      dropTarget.value = { paneId };
+      return;
+    }
+    const node = document.elementFromPoint(move.clientX, move.clientY);
+    const tabEl = node instanceof Element ? node.closest<HTMLElement>("[data-tab-id]") : null;
+    const overId = tabEl?.dataset.tabId;
+    if (overId && overId !== tabId) {
+      const box = tabEl.getBoundingClientRect();
+      dropTarget.value = { paneId, afterId: move.clientX > box.left + box.width / 2 ? overId : undefined };
+      if (move.clientX <= box.left + box.width / 2) {
+        const pane = findPane(workspace.value, paneId);
+        const index = pane?.tabIds.indexOf(overId) ?? -1;
+        dropTarget.value = { paneId, afterId: index > 0 ? pane?.tabIds[index - 1] : undefined };
+      }
+      return;
+    }
+    dropTarget.value = { paneId };
+  };
+
+  const onUp = () => {
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    window.removeEventListener("pointercancel", onUp);
+    document.body.classList.remove("dragging-tab");
+    const target = dropTarget.value;
+    draggingTabId.value = "";
+    dropTarget.value = null;
+    if (!started || !target) {
+      return;
+    }
+    applyTabDrop(tabId, target);
+  };
+
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
+  window.addEventListener("pointercancel", onUp);
+}
+
+function applyTabDrop(tabId: string, target: { paneId: string; afterId?: string; edge?: DropEdge }) {
+  if (target.edge) {
+    const direction = edgeToDirection(target.edge);
+    if (!ensureCanSplit(direction)) {
+      return;
+    }
+    const source = paneForTab(workspace.value, tabId);
+    if (!source || (source.tabIds.length <= 1 && source.id === target.paneId && workspace.value.panes.length < 2)) {
+      return;
+    }
+    let next = workspace.value;
+    if (source.id !== target.paneId || source.tabIds.length > 1) {
+      next = { ...next, focusedPaneId: target.paneId };
+      next = removeTabFromWorkspace(next, tabId);
+      if (!findPane(next, target.paneId)) {
+        next = focusPane(next, next.focusedPaneId);
+      } else {
+        next = focusPane(next, target.paneId);
+      }
+      const pane = emptyPane([tabId], tabId);
+      const result = splitFocused(next, pane, direction);
+      if ("error" in result) {
+        workspace.value = addTabToPane(workspace.value, workspace.value.focusedPaneId, tabId);
+      } else {
+        workspace.value = result;
+        flashPane(pane.id);
+      }
+      scheduleSaveTableTabs();
+      flashTab(tabId);
+    }
+    return;
+  }
+  workspace.value = moveTab(workspace.value, tabId, target.paneId, target.afterId);
+  scheduleSaveTableTabs();
 }
 
 function selectView(next: ConnectionViewTab) {
@@ -1220,9 +1680,7 @@ function removeTab(id: string) {
     if (renamingTabId.value === id) {
       renamingTabId.value = "";
     }
-    if (activeTableTabId.value === id) {
-      activeTableTabId.value = mostRecentTab(remaining.filter((item): item is TableTab => item.kind === "table"))?.id ?? next;
-    }
+    workspace.value = removeTabFromWorkspace(workspace.value, id);
     scheduleSaveTableTabs();
   }
 }
@@ -1979,7 +2437,7 @@ onUnmounted(() => {
         />
         <section v-show="view !== 'history'" class="db-main">
           <div
-            v-if="viewTabs.length || view === 'sql'"
+            v-if="view === 'sql' && (viewTabs.length || showSavedTab)"
             ref="subtabBar"
             class="subtab-bar"
             role="tablist"
@@ -2081,9 +2539,11 @@ onUnmounted(() => {
               +
             </button>
           </div>
-          <div v-if="!viewTabs.length && !(showSavedTab && activeTabId === SAVED_TAB_ID)" class="db-empty muted">
-            <p v-if="view === 'sql'">No open queries. Use + to start one.</p>
-            <p v-else>Pick a table on the left. Double-click one to open another tab on it.</p>
+          <div
+            v-if="view === 'sql' && !viewTabs.length && !(showSavedTab && activeTabId === SAVED_TAB_ID)"
+            class="db-empty muted"
+          >
+            <p>No open queries. Use + to start one.</p>
           </div>
           <SavedQueries
             v-if="connectionSaved.length"
@@ -2095,26 +2555,12 @@ onUnmounted(() => {
             @run="openSavedQuery($event, true)"
           />
           <div
-            v-for="tab in tabs"
-            v-show="activeTabId === tab.id"
+            v-for="tab in queryTabs"
+            v-show="view === 'sql' && activeQueryTabId === tab.id"
             :key="tab.id"
             class="db-main-pane"
           >
-            <TableView
-              v-if="tab.kind === 'table'"
-              :connection-id="sessionId"
-              :driver="driver"
-              :view="tab"
-              :ref="(instance) => setTableViewRef(tab.id, instance)"
-              :active="active && view === 'tables' && activeTableTabId === tab.id"
-              @changes="setTabChanges(tab.id, $event)"
-              @follow="followLink"
-              @update:view="updateView(tab.id, $event)"
-              @filter-state="setFilterIndicator(tab.id, $event)"
-              @open-sql="openQueryTab($event)"
-            />
             <QueryEditor
-              v-else
               :ref="(instance) => setEditorRef(tab.id, instance)"
               :connection-id="sessionId"
               :driver="driver"
@@ -2126,6 +2572,69 @@ onUnmounted(() => {
               @executed="onExecuted"
               @modified="setQueryModified(tab.id, $event)"
             />
+          </div>
+          <div v-show="view === 'tables'" ref="splitHost" class="split-workspace-host">
+            <SplitWorkspace
+              :node="workspace.layout"
+              :focused-pane-id="workspace.focusedPaneId"
+              :flash-pane-id="flashPaneId"
+              :pane-count="workspace.panes.length"
+              :drop-pane-id="dropHoverPaneId || (dropTarget?.edge ? dropTarget.paneId : '')"
+              :drop-edge="dropTarget?.edge ?? null"
+              :drop-preview-title="dropTarget?.edge && dragTableTab ? tabTitle(dragTableTab) : ''"
+              :drop-preview-filtered="Boolean(dropTarget?.edge && dragTableTab && filteredTabs.has(dragTableTab.id))"
+              @focus="onFocusPane"
+              @resize="onSplitResize"
+              @reset="onSplitReset"
+            >
+              <template #default="{ paneId }">
+                <TablePaneFrame
+                  :pane-id="paneId"
+                  :focused="workspace.focusedPaneId === paneId"
+                  :tabs="paneTabInfos(paneId)"
+                  :active-tab-id="findPane(workspace, paneId)?.activeTabId ?? ''"
+                  :renaming-tab-id="renamingTabId"
+                  :rename-value="renameValue"
+                  :dragging-tab-id="draggingTabId"
+                  :drop-after-id="dropTarget && dropTarget.paneId === paneId ? dropTarget.afterId ?? null : null"
+                  :drop-hover="dropHoverPaneId === paneId"
+                  @focus="onFocusPane(paneId)"
+                  @select="(id) => { const tab = tabs.find((item) => item.id === id); if (tab) selectTab(tab); }"
+                  @close="closeTab"
+                  @menu="(event, id) => { const tab = tabs.find((item) => item.id === id); if (tab) openTabMenu(event, tab); }"
+                  @rename-start="(id) => { const tab = tabs.find((item) => item.id === id); if (tab) startTabRename(tab); }"
+                  @update:rename-value="renameValue = $event"
+                  @rename-commit="commitTabRename"
+                  @rename-cancel="cancelTabRename"
+                  @filter-enter="showFilterPopover"
+                  @filter-leave="hideFilterPopover"
+                  @tab-pointer-down="onTabPointerDown"
+                >
+                  <div
+                    v-for="tab in tableTabsInPane(paneId)"
+                    v-show="findPane(workspace, paneId)?.activeTabId === tab.id"
+                    :key="tab.id"
+                    class="db-main-pane"
+                  >
+                    <TableView
+                      :connection-id="sessionId"
+                      :driver="driver"
+                      :view="tab"
+                      :ref="(instance) => setTableViewRef(tab.id, instance)"
+                      :active="active && view === 'tables' && workspace.focusedPaneId === paneId && findPane(workspace, paneId)?.activeTabId === tab.id"
+                      @changes="setTabChanges(tab.id, $event)"
+                      @follow="onTableFollow"
+                      @update:view="updateView(tab.id, $event)"
+                      @filter-state="setFilterIndicator(tab.id, $event)"
+                      @open-sql="openQueryTab($event)"
+                    />
+                  </div>
+                  <div v-if="!tableTabsInPane(paneId).length" class="db-empty muted">
+                    <p>Pick a table on the left. Double-click one to open another tab on it.</p>
+                  </div>
+                </TablePaneFrame>
+              </template>
+            </SplitWorkspace>
           </div>
         </section>
       </div>
@@ -2188,6 +2697,15 @@ onUnmounted(() => {
             </button>
             <button class="overflow-menu-item" type="button" role="menuitem" @click="runTableAction('openNew')">
               Open in new tab
+            </button>
+            <button
+              class="overflow-menu-item"
+              type="button"
+              role="menuitem"
+              :disabled="workspace.panes.length >= MAX_PANES && !otherPanes(workspace.focusedPaneId).length"
+              @click="runTableAction('openSide')"
+            >
+              Open to the side
             </button>
             <button class="overflow-menu-item" type="button" role="menuitem" @click="runTableAction('query')">
               Query
@@ -2252,6 +2770,45 @@ onUnmounted(() => {
           <button class="overflow-menu-item" type="button" role="menuitem" @click="duplicateTableTab(menuTableTab)">
             Duplicate tab
           </button>
+          <button
+            class="overflow-menu-item"
+            type="button"
+            role="menuitem"
+            :disabled="workspace.panes.length >= MAX_PANES"
+            @click="splitTableTab(menuTableTab, 'right')"
+          >
+            Split right
+          </button>
+          <button
+            class="overflow-menu-item"
+            type="button"
+            role="menuitem"
+            :disabled="workspace.panes.length >= MAX_PANES"
+            @click="splitTableTab(menuTableTab, 'down')"
+          >
+            Split down
+          </button>
+          <button
+            v-if="workspace.panes.length === 2 && otherPanes().length"
+            class="overflow-menu-item"
+            type="button"
+            role="menuitem"
+            @click="moveMenuTabToPane(otherPanes()[0].id)"
+          >
+            Move to other pane
+          </button>
+          <template v-else-if="workspace.panes.length > 2">
+            <button
+              v-for="pane in otherPanes()"
+              :key="pane.id"
+              class="overflow-menu-item"
+              type="button"
+              role="menuitem"
+              @click="moveMenuTabToPane(pane.id)"
+            >
+              Move to {{ pane.label }}
+            </button>
+          </template>
           <button class="overflow-menu-item" type="button" role="menuitem" @click="startTabRename(menuTableTab)">
             Rename…
           </button>
@@ -2295,6 +2852,20 @@ onUnmounted(() => {
           >
             Close tabs to the right
           </button>
+          <template v-if="workspace.panes.length > 1">
+            <div class="overflow-menu-divider" role="separator" />
+            <button
+              class="overflow-menu-item"
+              type="button"
+              role="menuitem"
+              @click="closeWorkspacePane(paneForTab(workspace, menuTableTab.id)?.id ?? '')"
+            >
+              Close pane
+            </button>
+            <button class="overflow-menu-item" type="button" role="menuitem" @click="mergeWorkspacePanes">
+              Merge all panes
+            </button>
+          </template>
         </div>
       </Teleport>
       <FilterPopover
