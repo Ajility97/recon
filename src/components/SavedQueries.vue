@@ -2,6 +2,7 @@
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { computed, nextTick, onUnmounted, ref, watch } from "vue";
 import { useApp } from "../composables/useApp";
+import { exportSqlFile } from "../transfer";
 import type { SavedQuery } from "../types";
 
 const props = defineProps<{
@@ -180,6 +181,22 @@ function openMenu(event: MouseEvent, query: SavedQuery) {
   });
 }
 
+async function exportFromMenu() {
+  const query = menu.value?.query;
+  closeMenu();
+  if (!query) {
+    return;
+  }
+  try {
+    const path = await exportSqlFile(query.name, query.sql);
+    if (path) {
+      showToast(`Exported “${query.name}” to ${path.split("/").pop()}`);
+    }
+  } catch (err) {
+    showToast(String(err), "error");
+  }
+}
+
 function deleteFromMenu() {
   const query = menu.value?.query;
   closeMenu();
@@ -230,6 +247,9 @@ onUnmounted(() => {
         :style="{ left: `${menu.x}px`, top: `${menu.y}px` }"
         @contextmenu.prevent
       >
+        <button class="overflow-menu-item" type="button" role="menuitem" @click="exportFromMenu">
+          Export .sql…
+        </button>
         <button class="overflow-menu-item danger" type="button" role="menuitem" @click="deleteFromMenu">
           Delete
         </button>

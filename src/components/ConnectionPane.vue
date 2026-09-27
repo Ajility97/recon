@@ -1677,6 +1677,7 @@ onUnmounted(() => {
               :storage-key="tab.key"
               :active="active && view === 'sql' && activeQueryTabId === tab.id"
               :saved-sql="savedFor(tab)?.sql ?? null"
+              :title="tabTitle(tab)"
               @executed="onExecuted"
               @modified="setQueryModified(tab.id, $event)"
             />

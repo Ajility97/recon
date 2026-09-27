@@ -7,7 +7,9 @@ import { tags as t } from "@lezer/highlight";
 import { basicSetup } from "codemirror";
 import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from "vue";
 import * as api from "../api";
+import { useApp } from "../composables/useApp";
 import { splitStatements, statementAt } from "../sql";
+import { exportSqlFile } from "../transfer";
 import type { Driver, RowValues, StatementResult } from "../types";
 import DataGrid from "./DataGrid.vue";
 
@@ -27,12 +29,15 @@ const props = defineProps<{
   storageKey: string;
   active: boolean;
   savedSql?: string | null;
+  title: string;
 }>();
 
 const emit = defineEmits<{
   executed: [statements: string[]];
   modified: [modified: boolean];
 }>();
+
+const { showToast } = useApp();
 
 const host = ref<HTMLDivElement | null>(null);
 const split = ref<HTMLDivElement | null>(null);
@@ -306,6 +311,17 @@ function getText() {
   return view?.state.doc.toString() ?? "";
 }
 
+async function exportSql() {
+  try {
+    const path = await exportSqlFile(props.title, getText());
+    if (path) {
+      showToast(`Exported to ${path.split("/").pop()}`);
+    }
+  } catch (err) {
+    showToast(String(err), "error");
+  }
+}
+
 watch(
   () => props.savedSql,
   () => checkModified(getText()),
@@ -420,6 +436,9 @@ defineExpose({ insertText, getText, focus, run });
           {{ statementCount }} {{ statementCount === 1 ? "statement" : "statements" }} ·
           {{ lastRunMs }}ms
         </span>
+        <button class="ghost tiny" type="button" title="Save the editor contents as a .sql file" @click="exportSql">
+          Export .sql
+        </button>
       </div>
     </div>
     <div ref="host" class="query-editor-host" :style="{ height: `${editorHeight}px` }" />

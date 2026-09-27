@@ -6,6 +6,14 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "0.5.0",
+    date: "September 26, 2026",
+    notes: [
+      "Save a query tab's SQL to a .sql file with the Export .sql button at the right end of the Run bar.",
+      "Right-click a saved query and choose Export .sql to save its SQL to a file.",
+    ],
+  },
+  {
     version: "0.4.0",
     date: "September 26, 2026",
     notes: [
