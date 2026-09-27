@@ -210,6 +210,7 @@ pub async fn export_sql(
         structure: request.structure,
         data: request.data,
         drop_tables: request.drop_tables,
+        routines: request.tables.is_none(),
     };
 
     let outcome = async {
