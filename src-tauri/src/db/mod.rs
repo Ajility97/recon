@@ -1,6 +1,7 @@
 pub mod dump;
 pub mod mysql;
 pub mod postgres;
+pub mod restore;
 pub mod sql_split;
 pub mod sqlite;
 pub mod ssh;

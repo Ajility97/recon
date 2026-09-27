@@ -526,6 +526,18 @@ async fn rename_mysql_database(session: &Session, from: &str, to: &str) -> Resul
     Ok(())
 }
 
+/// Points the query connection at the session's namespace again, after something recreated it.
+pub async fn reapply_namespace(session: &Session) -> Result<(), String> {
+    let namespace = session.namespace();
+    if namespace.is_empty() {
+        return Ok(());
+    }
+    if let Some(sql) = dialect(session.driver).use_namespace_sql(&namespace) {
+        conn_run(session, &sql, 0, None, QueryOrigin::Schema).await?;
+    }
+    Ok(())
+}
+
 async fn use_namespace(session: Arc<Session>, namespace: &str) -> Result<(), String> {
     if let Some(sql) = dialect(session.driver).use_namespace_sql(namespace) {
         conn_run(&session, &sql, 0, None, QueryOrigin::Schema).await?;

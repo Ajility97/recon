@@ -4,6 +4,7 @@ import { save } from "@tauri-apps/plugin-dialog";
 import { computed, onUnmounted, ref, watch } from "vue";
 import * as api from "../api";
 import { useApp } from "../composables/useApp";
+import { fileSafe, formatBytes } from "../transfer";
 import type { ExportProgress } from "../types";
 import Modal from "./Modal.vue";
 
@@ -80,26 +81,11 @@ const percent = computed(() => {
   return Math.round(((current.index - 1) / current.total) * 100);
 });
 
-function fileSafe(name: string) {
-  return name.replace(/[/\\:*?"<>|]+/g, "-");
-}
-
 function defaultName() {
   if (props.tables === null) {
     return props.namespace;
   }
   return props.tables.length === 1 ? props.tables[0] : `${props.namespace}-${props.tables.length}-tables`;
-}
-
-function formatBytes(bytes: number) {
-  const units = ["B", "KB", "MB", "GB"];
-  let value = bytes;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  return `${unit ? value.toFixed(1) : value} ${units[unit]}`;
 }
 
 function close() {

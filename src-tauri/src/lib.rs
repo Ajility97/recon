@@ -98,6 +98,9 @@ pub fn run() {
             db_commands::cancel_query,
             transfer_commands::export_sql,
             transfer_commands::import_sql,
+            transfer_commands::backup_database,
+            transfer_commands::read_backup_info,
+            transfer_commands::restore_database,
             transfer_commands::cancel_transfer,
         ])
         .run(tauri::generate_context!())

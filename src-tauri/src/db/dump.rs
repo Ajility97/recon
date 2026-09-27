@@ -1685,7 +1685,7 @@ mod tests {
         let body = conn.run("SELECT body FROM posts", 1, None).await.unwrap();
         assert_eq!(body.text_rows()[0][0].as_deref(), Some("-- not a comment; /* nor this */"));
 
-        import(&mut conn, sql.into_bytes()).await;
+        import(&mut conn, sql.clone().into_bytes()).await;
         assert_eq!(conn.run(compare, 10, None).await.unwrap().text_rows(), expected);
         let loud = conn.run("SELECT name FROM a_loud ORDER BY name", 10, None).await.unwrap().text_rows();
         assert_eq!(loud[1][0].as_deref(), Some("ZERO"));
@@ -1697,6 +1697,44 @@ mod tests {
         conn.execute("INSERT INTO posts VALUES (2, 5, 'fires the trigger')").await.unwrap();
         let note = conn.run("SELECT note FROM users WHERE id = 5", 1, None).await.unwrap();
         assert_eq!(note.text_rows()[0][0].as_deref(), Some("日本語 🎉+"));
+
+        for sql in [
+            "ALTER DATABASE recon_dump_dst CHARACTER SET latin1 COLLATE latin1_swedish_ci",
+            "USE recon_dump_dst",
+            "CREATE EVENT keep_me ON SCHEDULE EVERY 1 DAY DO SELECT 1",
+            "CREATE TABLE stray (a INT)",
+            "CREATE VIEW stray_view AS SELECT a FROM stray",
+            "CREATE PROCEDURE stray_proc() SELECT 1",
+            "DELETE FROM posts",
+        ] {
+            conn.execute(sql).await.unwrap_or_else(|err| panic!("{err}: {sql}"));
+        }
+        crate::db::restore::reset_namespace(&mut conn, Driver::Mysql, "recon_dump_dst").await.unwrap();
+        let leftovers = conn
+            .run(
+                "SELECT (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'recon_dump_dst') + \
+                 (SELECT COUNT(*) FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = 'recon_dump_dst')",
+                1,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(leftovers.rows[0][0].as_i64(), Some(0));
+        import(&mut conn, sql.into_bytes()).await;
+        assert_eq!(conn.run(compare, 10, None).await.unwrap().text_rows(), expected);
+        let kept = conn
+            .run(
+                "SELECT (SELECT COUNT(*) FROM information_schema.EVENTS WHERE EVENT_SCHEMA = 'recon_dump_dst'), \
+                 (SELECT DEFAULT_CHARACTER_SET_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = 'recon_dump_dst'), \
+                 (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'recon_dump_dst' \
+                     AND TABLE_NAME IN ('stray', 'stray_view'))",
+                1,
+                None,
+            )
+            .await
+            .unwrap()
+            .text_rows();
+        assert_eq!(kept[0], vec![Some("1".into()), Some("latin1".into()), Some("0".into())]);
 
         if let Ok(mysqldump) = std::env::var("RECON_TEST_MYSQLDUMP") {
             let output = std::process::Command::new(mysqldump)
@@ -1869,6 +1907,44 @@ mod tests {
         dst.execute("INSERT INTO extras (label) VALUES ('next')").await.unwrap();
         let ids = dst.run("SELECT id FROM extras ORDER BY id", 10, None).await.unwrap();
         assert_eq!(ids.text_rows(), vec![vec![Some("3".into())], vec![Some("4".into())]]);
+
+        async fn restore(conn: &mut Conn, sql: &str) -> Result<(), String> {
+            conn.execute("BEGIN").await?;
+            let ran = async {
+                crate::db::restore::reset_namespace(conn, Driver::Postgres, "moved").await?;
+                for statement in split_all(Driver::Postgres, sql.as_bytes()) {
+                    conn.execute(&statement.sql).await?;
+                }
+                conn.execute("COMMIT").await.map(|_| ())
+            }
+            .await;
+            if ran.is_err() {
+                conn.execute("ROLLBACK").await.unwrap();
+            }
+            ran
+        }
+        let count = "SELECT count(*) FROM moved.users";
+        let before = dst.run(count, 1, None).await.unwrap().text_rows();
+
+        dst.execute("CREATE SCHEMA outside").await.unwrap();
+        dst.execute("CREATE VIEW outside.peek AS SELECT id FROM moved.users").await.unwrap();
+        let err = restore(&mut dst, &sql).await.unwrap_err();
+        assert!(err.contains("outside.peek"), "{err}");
+        assert_eq!(dst.run(count, 1, None).await.unwrap().text_rows(), before);
+        dst.execute("DROP SCHEMA outside CASCADE").await.unwrap();
+
+        let err = restore(&mut dst, &format!("{sql}SELECT 1 / 0;\n")).await.unwrap_err();
+        assert!(err.contains("division by zero"), "{err}");
+        assert_eq!(dst.run(count, 1, None).await.unwrap().text_rows(), before);
+
+        restore(&mut dst, &sql).await.unwrap();
+        dst.execute("SET search_path TO moved, public").await.unwrap();
+        assert_eq!(dst.run(compare, 10, None).await.unwrap().text_rows(), expected);
+        let owner = dst
+            .run("SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = 'moved'", 1, None)
+            .await
+            .unwrap();
+        assert_eq!(owner.text_rows()[0][0].as_deref(), Some("recon_dump_user"));
 
         src.close().await;
         source.pool.close().await;

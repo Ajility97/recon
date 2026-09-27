@@ -2145,6 +2145,13 @@ button.link-button:hover:not(:disabled) {
   border-left: 1px solid var(--border);
 }
 
+.db-toolbar-transfer-divider {
+  align-self: stretch;
+  width: 1px;
+  margin: 0.2rem 0.15rem;
+  background: var(--border);
+}
+
 .db-toolbar-transfer button {
   display: inline-flex;
   align-items: center;
@@ -2212,6 +2219,33 @@ button.link-button:hover:not(:disabled) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.transfer-warning {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--bad) 45%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--bad) 8%, transparent);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.transfer-warning strong {
+  color: var(--bad);
+}
+
+.transfer-warning p,
+.transfer-warning ul {
+  margin: 0;
+}
+
+.transfer-warning ul {
+  max-height: 8rem;
+  padding-left: 1.1rem;
+  overflow: auto;
 }
 
 .transfer-error {

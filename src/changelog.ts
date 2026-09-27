@@ -9,6 +9,8 @@ export const CHANGELOG: ChangelogRelease[] = [
     version: "0.4.0",
     date: "September 26, 2026",
     notes: [
+      "Back up a whole database or schema with the Backup button next to Export. A backup always includes the structure, data, routines, and triggers, is gzipped, and lists anything Recon couldn't include.",
+      "Restore replaces everything in the current database or schema with a backup, so tables added since the backup are removed rather than left behind. On PostgreSQL the restore runs in one transaction, so a failure or cancel changes nothing. It refuses to run when something outside depends on what's being restored, like a view or foreign key in another schema or database, and names what's in the way. On MySQL, events are kept.",
       "PostgreSQL exports now include the enums, domains, composite types, and range types the tables use, along with the extensions they need, so the file imports into a fresh database. Types that already exist where you import are kept as they are.",
       "Exports now include triggers on MySQL and PostgreSQL. They're added after the data, so importing doesn't run them on rows that already went through them.",
       "Exporting a whole database now includes its stored functions and procedures. Exporting selected PostgreSQL tables includes just the functions those tables use.",

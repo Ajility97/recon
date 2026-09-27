@@ -304,6 +304,17 @@ export interface ImportProgress {
   totalBytes: number;
 }
 
+export interface BackupInfo {
+  version: number;
+  driver: Driver;
+  namespace: string;
+  server: string;
+  /** RFC 3339, in UTC. */
+  createdAt: string;
+  /** Tables and routines the backup left out, each with the reason. */
+  skipped: string[];
+}
+
 export type QueryOrigin = "editor" | "browse" | "schema" | "edit";
 
 export interface QueryLogEntry {

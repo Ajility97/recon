@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AppData,
+  BackupInfo,
   BrowseRequest,
   BrowseResult,
   ConnectionEntry,
@@ -238,6 +239,18 @@ export function exportSql(connectionId: string, transferId: string, request: Exp
 
 export function importSql(connectionId: string, transferId: string, namespace: string, path: string) {
   return invoke<ImportResult>("import_sql", { connectionId, transferId, namespace, path });
+}
+
+export function backupDatabase(connectionId: string, transferId: string, namespace: string, path: string) {
+  return invoke<ExportResult>("backup_database", { connectionId, transferId, namespace, path });
+}
+
+export function readBackupInfo(path: string) {
+  return invoke<BackupInfo>("read_backup_info", { path });
+}
+
+export function restoreDatabase(connectionId: string, transferId: string, namespace: string, path: string) {
+  return invoke<ImportResult>("restore_database", { connectionId, transferId, namespace, path });
 }
 
 export function cancelTransfer(transferId: string) {

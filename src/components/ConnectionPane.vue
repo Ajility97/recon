@@ -9,12 +9,14 @@ import { useConnectionForm } from "../composables/useConnectionForm";
 import { registerInnerTabCloser, setLiveTitle, useTabs } from "../composables/useTabs";
 import {
   driverLabel,
+  type BackupInfo,
   type CellEdit,
   type SavedQuery,
   type SessionInfo,
   type TableInfo,
   type TableLink,
 } from "../types";
+import BackupDialog from "./BackupDialog.vue";
 import ConnectionViewTabs, { type ConnectionViewTab } from "./ConnectionViewTabs.vue";
 import DatabaseSwitcher from "./DatabaseSwitcher.vue";
 import DriverIcon from "./DriverIcon.vue";
@@ -23,6 +25,7 @@ import ImportDialog from "./ImportDialog.vue";
 import Modal from "./Modal.vue";
 import QueryEditor from "./QueryEditor.vue";
 import QueryHistory from "./QueryHistory.vue";
+import RestoreDialog from "./RestoreDialog.vue";
 import SavedQueries from "./SavedQueries.vue";
 import TableView from "./TableView.vue";
 
@@ -107,6 +110,8 @@ const saveError = ref("");
 const saveNameInput = ref<HTMLInputElement | null>(null);
 const exportDialog = ref<{ tables: string[] | null } | null>(null);
 const importPath = ref<string | null>(null);
+const backupOpen = ref(false);
+const restoreTarget = ref<{ path: string; info: BackupInfo } | null>(null);
 let selectionAnchor = "";
 const editors = new Map<string, InstanceType<typeof QueryEditor>>();
 const tableViews = new Map<string, InstanceType<typeof TableView>>();
@@ -192,6 +197,9 @@ const tableMenuExportLabel = computed(() => {
 });
 
 const canTransfer = computed(() => Boolean(namespace.value || driver.value === "sqlite") && !lost.value);
+const canRestore = computed(
+  () => canTransfer.value && (driver.value !== "sqlite" || !namespace.value || namespace.value === "main"),
+);
 
 const subtitle = computed(() => {
   const connection = entry.value;
@@ -589,6 +597,23 @@ async function startImport() {
   });
   if (typeof path === "string") {
     importPath.value = path;
+  }
+}
+
+async function startRestore() {
+  const path = await openFile({
+    title: `Restore “${namespace.value}” from a backup`,
+    multiple: false,
+    directory: false,
+    filters: [{ name: "Recon backup", extensions: ["gz"] }],
+  });
+  if (typeof path !== "string") {
+    return;
+  }
+  try {
+    restoreTarget.value = { path, info: await api.readBackupInfo(path) };
+  } catch (err) {
+    showToast(String(err), "error");
   }
 }
 
@@ -1401,6 +1426,35 @@ onUnmounted(() => {
               </svg>
               Export
             </button>
+            <span class="db-toolbar-transfer-divider" aria-hidden="true" />
+            <button
+              class="ghost tiny"
+              type="button"
+              :disabled="!canTransfer"
+              :title="`Save a full backup of “${namespace}” that Restore can bring back`"
+              @click="backupOpen = true"
+            >
+              <svg viewBox="0 0 16 16" aria-hidden="true">
+                <path d="M3.5 2.5h7l2 2v8a1 1 0 0 1-1 1h-8a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1ZM5.5 2.5v3h5v-3M5 13.5v-4h6v4" />
+              </svg>
+              Backup
+            </button>
+            <button
+              class="ghost tiny"
+              type="button"
+              :disabled="!canRestore"
+              :title="
+                canRestore || !canTransfer
+                  ? `Replace everything in “${namespace}” with a Recon backup`
+                  : 'SQLite backups can only be restored into the main database'
+              "
+              @click="startRestore"
+            >
+              <svg viewBox="0 0 16 16" aria-hidden="true">
+                <path d="M2.8 8a5.2 5.2 0 1 0 1.5-3.7M2.5 2.5v2.8h2.8M8 5v3l2 1.5" />
+              </svg>
+              Restore
+            </button>
           </div>
         </div>
       </header>
@@ -1790,6 +1844,26 @@ onUnmounted(() => {
         :path="importPath"
         @imported="onImported"
         @close="importPath = null"
+      />
+      <BackupDialog
+        v-if="backupOpen"
+        :connection-id="sessionId"
+        :driver="driver"
+        :namespace="namespace"
+        :namespace-label="namespaceLabel"
+        :table-count="tables.length"
+        @close="backupOpen = false"
+      />
+      <RestoreDialog
+        v-if="restoreTarget"
+        :connection-id="sessionId"
+        :driver="driver"
+        :namespace="namespace"
+        :namespace-label="namespaceLabel"
+        :path="restoreTarget.path"
+        :info="restoreTarget.info"
+        @restored="onImported"
+        @close="restoreTarget = null"
       />
     </template>
   </div>
