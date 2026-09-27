@@ -582,6 +582,33 @@ function autoSize(index: number) {
   widths.value = next;
 }
 
+/**
+ * With no rows to scroll through but columns off to the side, a vertical
+ * wheel moves the grid horizontally. Shift+wheel, horizontal trackpad
+ * gestures, and pinch zoom keep their native behavior.
+ */
+function onWheel(event: WheelEvent) {
+  const node = scroller.value;
+  if (!node || event.shiftKey || event.ctrlKey || Math.abs(event.deltaY) <= Math.abs(event.deltaX)) {
+    return;
+  }
+  if (event.target instanceof Element && event.target.closest("textarea")) {
+    return;
+  }
+  const canScrollY = node.scrollHeight - node.clientHeight > 1;
+  const canScrollX = node.scrollWidth - node.clientWidth > 1;
+  if (canScrollY || !canScrollX) {
+    return;
+  }
+  event.preventDefault();
+  const scale = event.deltaMode === WheelEvent.DOM_DELTA_LINE
+    ? rowHeight.value
+    : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+      ? node.clientWidth
+      : 1;
+  node.scrollLeft += event.deltaY * scale;
+}
+
 function scrollToTop() {
   void nextTick(() => {
     if (scroller.value) {
@@ -608,6 +635,7 @@ defineExpose({ scrollToTop, commitEdit, editCell });
     }"
     @keydown="onKeydown"
     @dblclick="onBlankDblclick"
+    @wheel="onWheel"
   >
     <div class="grid-header" role="row">
       <div class="grid-gutter grid-corner" />

@@ -48,7 +48,7 @@ const MIN_HEIGHT = 76;
 const MIN_GRID = 160;
 const TOOLBAR = 40;
 const REVEAL_MARGIN = 6;
-/** Matches the `filter-flash` animation in styles.css. */
+/** Matches the `new-item-flash` animation in styles.css. */
 const FLASH_MS = 1800;
 
 const panel = ref<HTMLElement | null>(null);

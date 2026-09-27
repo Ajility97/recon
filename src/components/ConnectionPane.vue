@@ -112,6 +112,7 @@ const nameError = ref("");
 const nameBusy = ref(false);
 const nameInput = ref<HTMLInputElement | null>(null);
 const sidebarEl = ref<HTMLElement | null>(null);
+const subtabBar = ref<HTMLElement | null>(null);
 const selectedTables = ref(new Set<string>());
 const tableMenu = ref<{ x: number; y: number; tables: string[] } | null>(null);
 const tableMenuEl = ref<HTMLElement | null>(null);
@@ -411,6 +412,7 @@ function openQueryTab(initialSql?: string) {
   activeQueryTabId.value = tab.id;
   view.value = "sql";
   saveQueryTabs();
+  flashTab(tab.id);
   if (initialSql) {
     void nextTick(() => editors.get(tab.id)?.insertText(initialSql));
   }
@@ -437,6 +439,7 @@ function openSavedQuery(query: SavedQuery, run = false) {
     tab = { id: `query:${key}`, kind: "query", key, title: query.name, savedId: query.id };
     tabs.value = [...tabs.value, tab];
     saveQueryTabs();
+    flashTab(tab.id);
   }
   const id = tab.id;
   activeQueryTabId.value = id;
@@ -643,17 +646,79 @@ function insertTableTab(tab: TableTab, afterId?: string) {
   tabs.value = next;
   activeTableTabId.value = tab.id;
   scheduleSaveTableTabs();
+  flashTab(tab.id);
 }
 
-/** Focuses the most recently used tab on `table`, unless `newTab` asks for another view of it. */
-function openTable(table: TableInfo, newTab = false) {
+/** Turns a vertical mouse wheel into horizontal scrolling while the pointer is over the tab strip. */
+function onSubtabWheel(event: WheelEvent) {
+  const strip = event.currentTarget as HTMLElement;
+  if (strip.scrollWidth <= strip.clientWidth || Math.abs(event.deltaY) <= Math.abs(event.deltaX)) {
+    return;
+  }
+  event.preventDefault();
+  const scale = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16 : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? strip.clientWidth : 1;
+  strip.scrollLeft += event.deltaY * scale;
+}
+
+/** Matches the `new-item-flash` animation in styles.css. */
+const TAB_FLASH_MS = 1800;
+const flashTabId = ref("");
+let flashTabTimer = 0;
+
+/** Scrolls a newly opened tab into view in the tab strip and briefly highlights it. */
+function flashTab(id: string) {
+  flashTabId.value = id;
+  window.clearTimeout(flashTabTimer);
+  flashTabTimer = window.setTimeout(() => {
+    flashTabId.value = "";
+  }, TAB_FLASH_MS);
+  void nextTick(() => {
+    const strip = subtabBar.value;
+    const tab = strip?.querySelector<HTMLElement>(`[data-tab-id="${CSS.escape(id)}"]`);
+    if (!strip || !tab) {
+      return;
+    }
+    const box = strip.getBoundingClientRect();
+    const rect = tab.getBoundingClientRect();
+    if (rect.left < box.left) {
+      strip.scrollLeft -= box.left - rect.left + 8;
+    } else if (rect.right > box.right) {
+      strip.scrollLeft += rect.right - box.right + 8;
+    }
+  });
+}
+
+/**
+ * Focuses the most recently used tab on `table`, unless `newTab` asks for
+ * another view of it. A new tab goes after the table's other tabs, or after
+ * every tab when `atEnd` is set. Returns whether a tab was created.
+ */
+function openTable(table: TableInfo, newTab = false, atEnd = false) {
   const existing = tabsForTable(namespace.value, table.name);
   const recent = newTab ? undefined : mostRecentTab(existing);
   if (recent) {
     activeTableTabId.value = recent.id;
+    return false;
+  }
+  insertTableTab(
+    newTableTab(namespace.value, table.name, table.kind),
+    atEnd ? undefined : existing[existing.length - 1]?.id,
+  );
+  return true;
+}
+
+/** The table whose tab the latest single click created, so the double-click that follows doesn't add another. */
+let clickCreatedTab = "";
+
+function onTableDblclick(event: MouseEvent, table: TableInfo) {
+  if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
     return;
   }
-  insertTableTab(newTableTab(namespace.value, table.name, table.kind), existing[existing.length - 1]?.id);
+  if (clickCreatedTab === table.name) {
+    clickCreatedTab = "";
+    return;
+  }
+  openTable(table, true, true);
 }
 
 function updateView(id: string, patch: Partial<TableViewState>) {
@@ -754,8 +819,8 @@ function activeTableName() {
 /**
  * Finder-style selection: a plain click opens the table and selects only it,
  * Cmd+click toggles a table without opening it, and Shift+click selects the
- * visible range from the last clicked table. Option+click opens another tab
- * on the table.
+ * visible range from the last clicked table. Option+click and double-click
+ * open another tab on the table.
  */
 function onTableClick(event: MouseEvent, table: TableInfo) {
   if (event.altKey) {
@@ -788,7 +853,10 @@ function onTableClick(event: MouseEvent, table: TableInfo) {
   }
   selectedTables.value = new Set([table.name]);
   selectionAnchor = table.name;
-  openTable(table);
+  const created = openTable(table);
+  if (event.detail <= 1) {
+    clickCreatedTab = created ? table.name : "";
+  }
 }
 
 function onMenuKeydown(event: KeyboardEvent) {
@@ -1871,11 +1939,11 @@ onUnmounted(() => {
                 dirtyTableKeys.has(tableKey(namespace, table.name))
                   ? `${table.name} (unsaved changes)`
                   : table.kind === 'view'
-                    ? `${table.name} (view) · ⌥-click to open in a new tab`
-                    : `${table.name} · ⌥-click to open in a new tab`
+                    ? `${table.name} (view) · double-click to open in a new tab`
+                    : `${table.name} · double-click to open in a new tab`
               "
               @click="onTableClick($event, table)"
-              @dblclick="!$event.metaKey && !$event.shiftKey && queryTable(table)"
+              @dblclick="onTableDblclick($event, table)"
               @contextmenu="openTableMenu($event, table)"
             >
               <svg v-if="table.kind === 'view'" viewBox="0 0 16 16" aria-hidden="true">
@@ -1910,7 +1978,13 @@ onUnmounted(() => {
           :connection-name="entry?.name ?? ''"
         />
         <section v-show="view !== 'history'" class="db-main">
-          <div v-if="viewTabs.length || view === 'sql'" class="subtab-bar" role="tablist">
+          <div
+            v-if="viewTabs.length || view === 'sql'"
+            ref="subtabBar"
+            class="subtab-bar"
+            role="tablist"
+            @wheel="onSubtabWheel"
+          >
             <div
               v-if="showSavedTab"
               class="subtab saved-tab"
@@ -1935,7 +2009,9 @@ onUnmounted(() => {
                 query: tab.kind === 'query',
                 saved: Boolean(savedFor(tab)),
                 dirty: dirtyTabs.has(tab.id) || modifiedQueries.has(tab.id),
+                'tab-flash': flashTabId === tab.id,
               }"
+              :data-tab-id="tab.id"
               role="tab"
               :aria-selected="activeTabId === tab.id"
               :title="filterPopover?.tabId === tab.id ? undefined : tabTooltip(tab)"
@@ -2007,7 +2083,7 @@ onUnmounted(() => {
           </div>
           <div v-if="!viewTabs.length && !(showSavedTab && activeTabId === SAVED_TAB_ID)" class="db-empty muted">
             <p v-if="view === 'sql'">No open queries. Use + to start one.</p>
-            <p v-else>Pick a table on the left, or double-click one to query it.</p>
+            <p v-else>Pick a table on the left. Double-click one to open another tab on it.</p>
           </div>
           <SavedQueries
             v-if="connectionSaved.length"

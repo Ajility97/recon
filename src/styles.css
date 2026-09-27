@@ -2694,9 +2694,27 @@ button.view-tab.active:hover:not(:disabled) {
   flex: 0 0 auto;
   padding: 0.3rem 0.45rem 0;
   overflow-x: auto;
+  overflow-y: hidden;
   border-bottom: 1px solid var(--border);
   background: #0f1217;
-  scrollbar-width: none;
+}
+
+/* A custom scrollbar stays visible whenever the tabs overflow, unlike macOS's auto-hiding one. */
+.subtab-bar::-webkit-scrollbar {
+  height: 6px;
+}
+
+.subtab-bar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.subtab-bar::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.subtab-bar::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.28);
 }
 
 .subtab {
@@ -3340,14 +3358,18 @@ button.view-tab.active:hover:not(:disabled) {
   grid-template-columns: 3.9rem minmax(7rem, 10rem) minmax(7rem, 10rem) minmax(8rem, 1fr) auto auto 1.5rem 1.5rem;
 }
 
+.subtab.tab-flash {
+  animation: new-item-flash 1.8s ease-out;
+}
+
 .filter-row.filter-flash,
 .filter-subgroup-card.filter-flash {
   border-radius: 6px;
-  animation: filter-flash 1.8s ease-out;
+  animation: new-item-flash 1.8s ease-out;
 }
 
 /* No end frame, so the highlight fades into the element's own background. */
-@keyframes filter-flash {
+@keyframes new-item-flash {
   from,
   25% {
     background-color: rgba(230, 192, 123, 0.24);
