@@ -2998,10 +2998,13 @@ button.view-tab.active:hover:not(:disabled) {
   border-bottom: 1px solid var(--border);
 }
 
+/* Toolbar buttons keep their size; a long filter tag gives up the space instead. */
 .pane-toolbar button.tiny {
   display: inline-flex;
+  flex-shrink: 0;
   align-items: center;
   gap: 0.3rem;
+  white-space: nowrap;
 }
 
 .pane-toolbar .button-icon {
