@@ -1,4 +1,5 @@
 pub mod dump;
+pub mod filter;
 pub mod mysql;
 pub mod postgres;
 pub mod restore;
@@ -135,6 +136,10 @@ pub struct ColumnDetail {
     pub default_value: Option<String>,
     pub primary_key: bool,
     pub extra: String,
+    /// Which filter operators and value editors apply to the column.
+    pub filter_kind: filter::FilterKind,
+    /// Labels of a MySQL or Postgres enum, in declaration order.
+    pub enum_values: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -232,34 +237,14 @@ pub struct BrowseRequest {
     pub order_dir: Option<SortDirection>,
     #[serde(default)]
     pub count: bool,
-    /// Rows must match every column, as in `WHERE a = 1 AND b = 'x'`.
     #[serde(default)]
-    pub filter: Vec<CellEdit>,
-}
-
-/** The WHERE clause for a browse filter, with values inlined as escaped literals. */
-pub fn filter_sql(driver: Driver, filter: &[CellEdit]) -> String {
-    if filter.is_empty() {
-        return String::new();
-    }
-    let dialect = dialect(driver);
-    let conditions: Vec<String> = filter
-        .iter()
-        .map(|cell| {
-            let column = dialect.quote_ident(&cell.column);
-            let value = match (&cell.value, driver) {
-                (EditValue::Null, _) => return format!("{column} IS NULL"),
-                (value, Driver::Postgres) => value.postgres_literal(),
-                (EditValue::Bool(value), _) => i64::from(*value).to_string(),
-                (EditValue::Int(value), _) => value.to_string(),
-                (EditValue::Float(value), _) => value.to_string(),
-                (EditValue::Text(text), Driver::Mysql) => quote_literal(&text.replace('\\', "\\\\")),
-                (EditValue::Text(text), Driver::Sqlite) => quote_literal(text),
-            };
-            format!("{column} = {value}")
-        })
-        .collect();
-    format!(" WHERE {}", conditions.join(" AND "))
+    pub filter: Option<filter::FilterNode>,
+    /// Minutes east of UTC, applied to date bounds on time-zone-aware columns.
+    #[serde(default)]
+    pub utc_offset: Option<i32>,
+    /// Lets `cancel_browse` stop this query while it runs.
+    #[serde(default)]
+    pub request_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -827,6 +812,125 @@ impl Pool {
             Pool::Sqlite(pool) => Conn::Sqlite(pool.acquire().await.map_err(describe_error)?.detach()),
         })
     }
+
+    pub async fn acquire(&self) -> Result<PooledConn, String> {
+        Ok(match self {
+            Pool::MySql(pool) => PooledConn::MySql(pool.acquire().await.map_err(describe_error)?),
+            Pool::Postgres(pool) => PooledConn::Postgres(pool.acquire().await.map_err(describe_error)?),
+            Pool::Sqlite(pool) => PooledConn::Sqlite(pool.acquire().await.map_err(describe_error)?),
+        })
+    }
+
+    pub async fn run_statement(&self, statement: &filter::Fragment, limit: usize) -> Result<RawOutput, String> {
+        self.acquire().await?.run_statement(statement, limit).await
+    }
+}
+
+/**
+ * A pooled connection held for a few statements in a row, such as setting a
+ * statement timeout, running a query, and resetting the timeout.
+ */
+pub enum PooledConn {
+    MySql(sqlx::pool::PoolConnection<sqlx::MySql>),
+    Postgres(sqlx::pool::PoolConnection<sqlx::Postgres>),
+    Sqlite(sqlx::pool::PoolConnection<sqlx::Sqlite>),
+}
+
+impl PooledConn {
+    pub fn driver(&self) -> Driver {
+        match self {
+            PooledConn::MySql(_) => Driver::Mysql,
+            PooledConn::Postgres(_) => Driver::Postgres,
+            PooledConn::Sqlite(_) => Driver::Sqlite,
+        }
+    }
+
+    pub async fn run(&mut self, sql: &str, limit: usize) -> Result<RawOutput, String> {
+        match self {
+            PooledConn::MySql(conn) => mysql::run(conn, sql, limit, None).await,
+            PooledConn::Postgres(conn) => postgres::run(conn, sql, limit, None).await,
+            PooledConn::Sqlite(conn) => sqlite::run(conn, sql, limit, None).await,
+        }
+    }
+
+    /**
+     * SQLite binds the values as parameters. MySQL and Postgres return
+     * prepared-statement rows in a binary format the grid can't decode, so
+     * their values are written as escaped literals and sent as plain text.
+     */
+    pub async fn run_statement(&mut self, statement: &filter::Fragment, limit: usize) -> Result<RawOutput, String> {
+        match self {
+            PooledConn::Sqlite(conn) => {
+                let (sql, params) = statement.bound();
+                sqlite::run_bound(conn, &sql, &params, limit).await
+            }
+            _ => {
+                let sql = statement.inline(self.driver());
+                self.run(&sql, limit).await
+            }
+        }
+    }
+
+    /// The server's id for this connection, which `KILL QUERY` or `pg_cancel_backend` needs.
+    pub async fn backend_id(&mut self) -> Option<i64> {
+        let sql = match self {
+            PooledConn::MySql(_) => "SELECT CONNECTION_ID()",
+            PooledConn::Postgres(_) => "SELECT pg_backend_pid()",
+            PooledConn::Sqlite(_) => return None,
+        };
+        self.run(sql, 1).await.ok()?.rows.first()?.first()?.as_i64()
+    }
+
+    /**
+     * Sets or clears a server-side limit on how long each statement may run.
+     * Returns whether a limit is in place. SQLite has none.
+     */
+    pub async fn set_timeout(&mut self, timeout: Option<Duration>) -> bool {
+        let millis = timeout.map(|limit| limit.as_millis().max(1));
+        match self {
+            PooledConn::Postgres(_) => {
+                let sql = match millis {
+                    Some(ms) => format!("SET statement_timeout = {ms}"),
+                    None => "RESET statement_timeout".into(),
+                };
+                self.run(&sql, 0).await.is_ok() && millis.is_some()
+            }
+            PooledConn::MySql(_) => {
+                let (mysql, mariadb) = match millis {
+                    Some(ms) => (
+                        format!("SET SESSION max_execution_time = {ms}"),
+                        format!("SET SESSION max_statement_time = {:.3}", ms as f64 / 1000.0),
+                    ),
+                    None => (
+                        "SET SESSION max_execution_time = DEFAULT".into(),
+                        "SET SESSION max_statement_time = DEFAULT".into(),
+                    ),
+                };
+                let set = self.run(&mysql, 0).await.is_ok() || self.run(&mariadb, 0).await.is_ok();
+                set && millis.is_some()
+            }
+            PooledConn::Sqlite(_) => false,
+        }
+    }
+
+    /// Closes the connection instead of returning it to the pool, for when its state is unknown.
+    pub async fn discard(self) {
+        let _ = match self {
+            PooledConn::MySql(conn) => conn.close().await,
+            PooledConn::Postgres(conn) => conn.close().await,
+            PooledConn::Sqlite(conn) => conn.close().await,
+        };
+    }
+}
+
+/// True for errors raised when a statement ran past its server-side time limit or was cancelled.
+pub fn is_timeout_or_cancel(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("statement timeout")
+        || lower.contains("canceling statement")
+        || lower.contains("maximum statement execution time")
+        || lower.contains("max_statement_time")
+        || lower.contains("query execution was interrupted")
 }
 
 pub enum Conn {
@@ -888,9 +992,35 @@ pub struct Session {
     pub lost: AtomicBool,
     pub namespace: Mutex<String>,
     pub tunnel: Option<ssh::Tunnel>,
+    /// Column lists by namespace and table, so filters can be checked without a catalog query each time.
+    pub columns: Mutex<HashMap<(String, String), Arc<Vec<ColumnDetail>>>>,
+    /// Backend ids of browse queries that can be cancelled, by request id.
+    pub running: tokio::sync::Mutex<HashMap<String, i64>>,
 }
 
 impl Session {
+    pub fn cached_columns(&self, namespace: &str, table: &str) -> Option<Arc<Vec<ColumnDetail>>> {
+        self.columns
+            .lock()
+            .ok()?
+            .get(&(namespace.to_string(), table.to_string()))
+            .cloned()
+    }
+
+    pub fn cache_columns(&self, namespace: &str, table: &str, columns: Arc<Vec<ColumnDetail>>) {
+        if let Ok(mut cache) = self.columns.lock() {
+            cache.insert((namespace.to_string(), table.to_string()), columns);
+        }
+    }
+
+    pub fn forget_columns(&self, namespace: Option<&str>, table: Option<&str>) {
+        if let Ok(mut cache) = self.columns.lock() {
+            cache.retain(|(ns, name), _| {
+                !(namespace.is_none_or(|wanted| wanted == ns) && table.is_none_or(|wanted| wanted == name))
+            });
+        }
+    }
+
     pub fn is_lost(&self) -> bool {
         self.lost.load(Ordering::Relaxed)
     }
@@ -1871,27 +2001,104 @@ mod tests {
         assert_eq!(saved.rows[0], vec![CellValue::Text("ada'".into()), CellValue::Int(42)]);
     }
 
-    #[test]
-    fn builds_browse_filters_for_each_driver() {
-        let filter: Vec<CellEdit> = serde_json::from_value(serde_json::json!([
-            { "column": "id", "value": 7 },
-            { "column": "code", "value": "o'b\\c" },
-            { "column": "gone", "value": null },
-        ]))
-        .unwrap();
+    #[tokio::test]
+    async fn runs_filtered_sqlite_browses_with_bound_values() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let pool = Pool::Sqlite(pool);
+        for sql in [
+            "CREATE TABLE orders (id INTEGER PRIMARY KEY, status TEXT, amount REAL, placed DATETIME, note TEXT)",
+            "INSERT INTO orders VALUES (1, 'Active', 50, '2026-09-01 10:00:00', 'x'), \
+             (2, 'Active', 150, '2026-09-27T08:00:00', NULL), (3, 'Closed', 900, '2026-09-27 23:59:59', '50% off'), \
+             (4, 'o''b', 5, NULL, 'plain')",
+        ] {
+            pool.run(sql, 0).await.unwrap();
+        }
+        let classes: HashMap<_, _> = [("id", "INTEGER"), ("status", "TEXT"), ("amount", "REAL"), ("placed", "DATETIME"), ("note", "TEXT")]
+            .iter()
+            .map(|(name, data_type)| (name.to_string(), filter::classify(Driver::Sqlite, data_type)))
+            .collect();
+        let ids = |root: serde_json::Value| {
+            let pool = &pool;
+            let classes = &classes;
+            async move {
+                let root: filter::FilterNode = serde_json::from_value(root).unwrap();
+                let ctx = filter::FilterContext { driver: Driver::Sqlite, columns: classes, utc_offset: None };
+                let mut statement = filter::Fragment::new("SELECT id FROM \"orders\" WHERE ");
+                statement.append(filter::compile(&ctx, &root).unwrap().unwrap());
+                statement.push_sql(" ORDER BY id");
+                let output = pool.run_statement(&statement, 100).await.unwrap();
+                output.rows.iter().map(|row| row[0].as_i64().unwrap()).collect::<Vec<_>>()
+            }
+        };
         assert_eq!(
-            filter_sql(Driver::Mysql, &filter),
-            " WHERE `id` = 7 AND `code` = 'o''b\\\\c' AND `gone` IS NULL"
+            ids(serde_json::json!({ "kind": "group", "match": "all", "children": [
+                { "kind": "condition", "column": "status", "op": "eq", "values": ["Active"] },
+                { "kind": "condition", "column": "amount", "op": "gt", "values": ["100"] }
+            ]}))
+            .await,
+            vec![2]
         );
         assert_eq!(
-            filter_sql(Driver::Sqlite, &filter),
-            " WHERE \"id\" = 7 AND \"code\" = 'o''b\\c' AND \"gone\" IS NULL"
+            ids(serde_json::json!({ "kind": "group", "match": "all", "children": [
+                { "kind": "condition", "column": "placed", "op": "gte", "values": ["2026-09-27 00:00:00"] },
+                { "kind": "condition", "column": "placed", "op": "lt", "values": ["2026-09-28 00:00:00"] }
+            ]}))
+            .await,
+            vec![2, 3]
         );
         assert_eq!(
-            filter_sql(Driver::Postgres, &filter),
-            " WHERE \"id\" = E'7' AND \"code\" = E'o''b\\\\c' AND \"gone\" IS NULL"
+            ids(serde_json::json!({ "kind": "condition", "column": "note", "op": "contains", "values": ["50%"] })).await,
+            vec![3]
         );
-        assert_eq!(filter_sql(Driver::Mysql, &[]), "");
+        assert_eq!(
+            ids(serde_json::json!({ "kind": "condition", "column": "status", "op": "in", "values": ["o'b", "Closed"] })).await,
+            vec![3, 4]
+        );
+        assert_eq!(
+            ids(serde_json::json!({ "kind": "condition", "column": "note", "op": "isNull" })).await,
+            vec![2]
+        );
+    }
+
+    #[tokio::test]
+    async fn tells_empty_strings_spaces_and_nulls_apart() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let pool = Pool::Sqlite(pool);
+        for sql in [
+            "CREATE TABLE notes (id INTEGER PRIMARY KEY, note TEXT)",
+            "INSERT INTO notes VALUES (1, ''), (2, ' '), (3, NULL), (4, 'a b')",
+        ] {
+            pool.run(sql, 0).await.unwrap();
+        }
+        let classes: HashMap<_, _> = [("note".to_string(), filter::classify(Driver::Sqlite, "TEXT"))].into();
+        let ids = |root: serde_json::Value| {
+            let (pool, classes) = (&pool, &classes);
+            async move {
+                let root: filter::FilterNode = serde_json::from_value(root).unwrap();
+                let ctx = filter::FilterContext { driver: Driver::Sqlite, columns: classes, utc_offset: None };
+                let mut statement = filter::Fragment::new("SELECT id FROM notes WHERE ");
+                statement.append(filter::compile(&ctx, &root).unwrap().unwrap());
+                statement.push_sql(" ORDER BY id");
+                let output = pool.run_statement(&statement, 10).await.unwrap();
+                output.rows.iter().map(|row| row[0].as_i64().unwrap()).collect::<Vec<_>>()
+            }
+        };
+        let condition = |op: &str, values: serde_json::Value| {
+            serde_json::json!({ "kind": "condition", "column": "note", "op": op, "values": values })
+        };
+        assert_eq!(ids(condition("isEmpty", serde_json::json!([]))).await, vec![1]);
+        assert_eq!(ids(condition("isNotEmpty", serde_json::json!([]))).await, vec![2, 4]);
+        assert_eq!(ids(condition("eq", serde_json::json!([" "]))).await, vec![2]);
+        assert_eq!(ids(condition("contains", serde_json::json!([" "]))).await, vec![2, 4]);
+        assert_eq!(ids(condition("isNull", serde_json::json!([]))).await, vec![3]);
     }
 
     #[tokio::test]
@@ -1927,11 +2134,16 @@ mod tests {
                 ("editor".into(), "main", "users", "id".into()),
             ]
         );
-        let filter = vec![CellEdit { column: "id".into(), value: EditValue::Int(2) }];
-        let found = pool
-            .run(&format!("SELECT name FROM \"main\".\"users\"{}", filter_sql(Driver::Sqlite, &filter)), 10)
-            .await
-            .unwrap();
+        let classes: HashMap<_, _> = [("id".to_string(), filter::classify(Driver::Sqlite, "INTEGER"))].into();
+        let ctx = filter::FilterContext { driver: Driver::Sqlite, columns: &classes, utc_offset: None };
+        let follow = filter::FilterNode::all(vec![filter::FilterNode::condition(
+            "id",
+            filter::FilterOp::Eq,
+            vec![EditValue::Text("2".into())],
+        )]);
+        let mut statement = filter::Fragment::new("SELECT name FROM \"main\".\"users\" WHERE ");
+        statement.append(filter::compile(&ctx, &follow).unwrap().unwrap());
+        let found = pool.run_statement(&statement, 10).await.unwrap();
         assert_eq!(found.rows, vec![vec![CellValue::Text("bob".into())]]);
     }
 

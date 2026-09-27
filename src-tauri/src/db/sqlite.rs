@@ -3,11 +3,12 @@ use std::sync::atomic::AtomicBool;
 use sqlx::sqlite::{
     SqliteConnectOptions, SqliteConnection, SqlitePoolOptions, SqliteQueryResult, SqliteRow,
 };
-use sqlx::{Connection, Row, Sqlite, TypeInfo, ValueRef};
+use futures_util::TryStreamExt;
+use sqlx::{Connection, Executor, Row, Sqlite, TypeInfo, ValueRef};
 
 use super::{
-    quote_double, quote_literal, run_raw, with_timeout, CellValue, Conn, Dialect, Opened, Pool,
-    RawOutput, CONNECT_TIMEOUT,
+    column_meta, describe_error, quote_double, quote_literal, run_raw, with_timeout, CellValue, Conn, Dialect,
+    EditValue, Opened, Pool, RawOutput, CONNECT_TIMEOUT,
 };
 use crate::models::ConnectionEntry;
 
@@ -60,6 +61,49 @@ pub async fn run(
     cancel: Option<&AtomicBool>,
 ) -> Result<RawOutput, String> {
     run_raw::<Sqlite>(conn, sql, limit, cancel, cell, affected).await
+}
+
+/** Runs one statement with `params` bound to its `?` placeholders. */
+pub async fn run_bound(
+    conn: &mut SqliteConnection,
+    sql: &str,
+    params: &[EditValue],
+    limit: usize,
+) -> Result<RawOutput, String> {
+    let mut query = sqlx::query::<Sqlite>(sql);
+    for param in params {
+        query = match param {
+            EditValue::Null => query.bind(None::<String>),
+            EditValue::Bool(value) => query.bind(*value),
+            EditValue::Int(value) => query.bind(*value),
+            EditValue::Float(value) => query.bind(*value),
+            EditValue::Text(value) => query.bind(value.as_str()),
+        };
+    }
+    let mut columns = None;
+    let mut rows = Vec::new();
+    let mut truncated = false;
+    {
+        let mut stream = query.fetch(&mut *conn);
+        while let Some(row) = stream.try_next().await.map_err(describe_error)? {
+            if columns.is_none() {
+                columns = Some(column_meta::<Sqlite>(row.columns()));
+            }
+            if rows.len() >= limit {
+                truncated = true;
+                break;
+            }
+            rows.push((0..row.len()).map(|index| cell(&row, index)).collect());
+        }
+    }
+    let columns = match columns {
+        Some(columns) => columns,
+        None => match (&mut *conn).describe(sql).await {
+            Ok(described) => column_meta::<Sqlite>(described.columns()),
+            Err(_) => Vec::new(),
+        },
+    };
+    Ok(RawOutput { columns, rows, rows_affected: 0, truncated })
 }
 
 pub fn cell(row: &SqliteRow, index: usize) -> CellValue {

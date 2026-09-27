@@ -161,7 +161,9 @@ impl Dialect for PostgresDialect {
              pg_get_expr(d.adbin, d.adrelid), \
              EXISTS (SELECT 1 FROM pg_catalog.pg_index i \
                      WHERE i.indrelid = a.attrelid AND i.indisprimary AND a.attnum = ANY(i.indkey)), \
-             CASE WHEN a.attidentity <> '' THEN 'identity' ELSE '' END \
+             CASE WHEN a.attidentity <> '' THEN 'identity' ELSE '' END, \
+             (SELECT array_to_json(array_agg(e.enumlabel ORDER BY e.enumsortorder))::text \
+              FROM pg_catalog.pg_enum e WHERE e.enumtypid = a.atttypid) \
              FROM pg_catalog.pg_attribute a \
              JOIN pg_catalog.pg_class c ON c.oid = a.attrelid \
              JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
