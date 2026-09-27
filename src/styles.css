@@ -3032,6 +3032,39 @@ button.view-tab.active:hover:not(:disabled) {
   padding: 0.2rem 0.35rem;
 }
 
+.auto-refresh-dot {
+  position: absolute;
+  right: 0.06rem;
+  top: 0.06rem;
+  width: 0.38rem;
+  height: 0.38rem;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1.5px var(--bg);
+}
+
+.auto-refresh.enabled .auto-refresh-dot {
+  background: var(--good);
+}
+
+.auto-refresh.paused .auto-refresh-dot {
+  background: var(--warn);
+}
+
+.auto-refresh-menu .overflow-menu-dropdown {
+  min-width: 8.25rem;
+}
+
+.auto-refresh-menu .overflow-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.auto-refresh-menu .menu-check {
+  color: var(--muted);
+}
+
 .pane-toolbar .button-icon {
   width: 0.9rem;
   height: 0.9rem;

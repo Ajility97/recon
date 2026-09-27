@@ -97,6 +97,51 @@ export interface TableViewState {
   title?: string;
   /** Rows this tab loads per page. Missing means the app default, capped at `MAX_TAB_PAGE_SIZE`. */
   pageSize?: number;
+  /** Missing or omitted means auto refresh is off. */
+  autoRefresh?: AutoRefreshState;
+}
+
+export interface AutoRefreshState {
+  intervalMs: number;
+  paused: boolean;
+}
+
+export const AUTO_REFRESH_PRESETS = [
+  { label: "5 s", ms: 5_000 },
+  { label: "30 s", ms: 30_000 },
+  { label: "1 m", ms: 60_000 },
+  { label: "5 m", ms: 300_000 },
+] as const;
+
+export const MIN_AUTO_REFRESH_MS = 1_000;
+export const MAX_AUTO_REFRESH_MS = 3_600_000;
+
+export function clampAutoRefreshMs(value: number) {
+  if (!Number.isFinite(value)) {
+    return AUTO_REFRESH_PRESETS[1].ms;
+  }
+  return Math.min(MAX_AUTO_REFRESH_MS, Math.max(MIN_AUTO_REFRESH_MS, Math.round(value)));
+}
+
+export function formatAutoRefresh(ms: number) {
+  if (ms % 60_000 === 0) {
+    return `${ms / 60_000} m`;
+  }
+  return `${Math.max(1, Math.round(ms / 1000))} s`;
+}
+
+export function sanitizeAutoRefresh(value: unknown): AutoRefreshState | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const intervalMs = Number((value as { intervalMs?: unknown }).intervalMs);
+  if (!Number.isFinite(intervalMs)) {
+    return undefined;
+  }
+  return {
+    intervalMs: clampAutoRefreshMs(intervalMs),
+    paused: (value as { paused?: unknown }).paused === true,
+  };
 }
 
 export const TAB_PAGE_SIZES = [50, 100, 200, 300, 500] as const;

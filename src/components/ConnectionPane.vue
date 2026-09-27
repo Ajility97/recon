@@ -15,6 +15,7 @@ import {
   linkFilter,
   newId,
   clampTabPageSize,
+  sanitizeAutoRefresh,
   sanitizeFilter,
   type TableViewState,
 } from "../filters/model";
@@ -398,6 +399,7 @@ function saveTableTabs() {
               origin: tab.origin,
               title: tab.title,
               pageSize: tab.pageSize != null ? clampTabPageSize(tab.pageSize) : undefined,
+              autoRefresh: tab.autoRefresh,
             },
           ]
         : [],
@@ -442,6 +444,7 @@ function restoredTableTab(value: unknown): TableTab | null {
       typeof item.pageSize === "number" && Number.isFinite(item.pageSize)
         ? clampTabPageSize(item.pageSize)
         : undefined,
+    autoRefresh: sanitizeAutoRefresh(item.autoRefresh),
   };
 }
 
@@ -2634,6 +2637,7 @@ onUnmounted(() => {
                       :view="tab"
                       :ref="(instance) => setTableViewRef(tab.id, instance)"
                       :active="active && view === 'tables' && workspace.focusedPaneId === paneId && findPane(workspace, paneId)?.activeTabId === tab.id"
+                      :visible="view === 'tables' && findPane(workspace, paneId)?.activeTabId === tab.id"
                       @changes="setTabChanges(tab.id, $event)"
                       @follow="onTableFollow"
                       @update:view="updateView(tab.id, $event)"

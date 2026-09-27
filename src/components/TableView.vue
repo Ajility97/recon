@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import * as api from "../api";
 import { useApp } from "../composables/useApp";
+import { useOverflowMenu } from "../composables/useOverflowMenu";
 import { placeAtPoint, useDismiss, type PopoverPosition } from "../composables/usePopover";
 import { isBytes, isNumericColumn } from "../cells";
 import {
@@ -17,11 +18,14 @@ import {
   dropBlankConditions,
   emptyGroup,
   hasConditions,
+  AUTO_REFRESH_PRESETS,
   MAX_CONDITIONS,
   MAX_TAB_PAGE_SIZE,
   TAB_PAGE_SIZES,
+  clampAutoRefreshMs,
   clampTabPageSize,
   conditions as allConditions,
+  formatAutoRefresh,
   newCondition,
   newId,
   renameColumn,
@@ -74,6 +78,7 @@ const props = defineProps<{
   connectionId: string;
   driver: Driver;
   active: boolean;
+  visible?: boolean;
   view: TableViewState;
 }>();
 
@@ -333,6 +338,42 @@ const dirty = computed(
   () => pending.value.size > 0 || newRowIds.value.length > 0 || structureChanges.value > 0,
 );
 const refreshing = computed(() => (mode.value === "data" ? loading.value : loadingStructure.value));
+const autoRefreshMenuId = newId("ar");
+const {
+  isOpen: autoRefreshMenuOpen,
+  toggle: toggleAutoRefreshMenu,
+  close: closeAutoRefreshMenu,
+} = useOverflowMenu(() => autoRefreshMenuId);
+const customRefresh = ref(false);
+const customRefreshSeconds = ref(30);
+const autoRefresh = computed(() => props.view.autoRefresh);
+const autoRefreshOn = computed(() => Boolean(autoRefresh.value) && !autoRefresh.value?.paused);
+const autoRefreshPaused = computed(() => Boolean(autoRefresh.value?.paused));
+const autoRefreshTitle = computed(() => {
+  const current = autoRefresh.value;
+  if (!current) {
+    return "Auto refresh";
+  }
+  const every = formatAutoRefresh(current.intervalMs);
+  return current.paused ? `Auto refresh paused (${every})` : `Auto refresh every ${every}`;
+});
+let autoRefreshTimer = 0;
+let autoRefreshClock = 0;
+const nextRefreshAt = ref(0);
+const autoRefreshNow = ref(Date.now());
+const autoRefreshRemaining = computed(() => {
+  if (!autoRefreshOn.value) {
+    return "";
+  }
+  if (loading.value && mode.value === "data") {
+    return "Refreshing…";
+  }
+  const left = Math.max(0, nextRefreshAt.value - autoRefreshNow.value);
+  if (left <= 0) {
+    return "Refreshing…";
+  }
+  return `Refreshing in ${formatAutoRefresh(Math.ceil(left / 1000) * 1000)}`;
+});
 const canInsert = computed(
   () => kind.value === "table" && Boolean(result.value) && Boolean(structure.value),
 );
@@ -549,6 +590,89 @@ function refresh() {
   }
   void loadData(true, false);
 }
+
+function isAutoRefreshPreset(ms: number) {
+  return AUTO_REFRESH_PRESETS.some((preset) => preset.ms === ms);
+}
+
+function setAutoRefresh(next: TableViewState["autoRefresh"]) {
+  emit("update:view", { autoRefresh: next });
+  closeAutoRefreshMenu();
+}
+
+function pauseAutoRefresh() {
+  const current = autoRefresh.value;
+  setAutoRefresh({
+    intervalMs: current?.intervalMs ?? AUTO_REFRESH_PRESETS[1].ms,
+    paused: true,
+  });
+}
+
+function disableAutoRefresh() {
+  setAutoRefresh(undefined);
+}
+
+function enableAutoRefresh(intervalMs: number) {
+  setAutoRefresh({ intervalMs: clampAutoRefreshMs(intervalMs), paused: false });
+}
+
+function openCustomRefresh() {
+  customRefreshSeconds.value = Math.round((autoRefresh.value?.intervalMs ?? 30_000) / 1000);
+  customRefresh.value = true;
+  closeAutoRefreshMenu();
+}
+
+function applyCustomRefresh() {
+  enableAutoRefresh(customRefreshSeconds.value * 1000);
+  customRefresh.value = false;
+}
+
+function stopAutoRefreshTimer() {
+  window.clearInterval(autoRefreshTimer);
+  autoRefreshTimer = 0;
+  window.clearInterval(autoRefreshClock);
+  autoRefreshClock = 0;
+}
+
+function scheduleNextRefresh(intervalMs: number) {
+  nextRefreshAt.value = Date.now() + intervalMs;
+  autoRefreshNow.value = Date.now();
+}
+
+function autoRefreshTick() {
+  const current = autoRefresh.value;
+  if (current && !current.paused) {
+    scheduleNextRefresh(current.intervalMs);
+  }
+  if (dirty.value || loading.value || mode.value !== "data") {
+    return;
+  }
+  clock.value = new Date();
+  if (autoApplyFilters.value && !compiled.value.pending) {
+    applied.value = appliedFrom(compiled.value);
+  }
+  void loadData(true, false);
+}
+
+function startAutoRefreshTimer() {
+  stopAutoRefreshTimer();
+  const current = autoRefresh.value;
+  if (!current || current.paused || props.visible === false) {
+    nextRefreshAt.value = 0;
+    return;
+  }
+  scheduleNextRefresh(current.intervalMs);
+  autoRefreshTimer = window.setInterval(autoRefreshTick, current.intervalMs);
+  autoRefreshClock = window.setInterval(() => {
+    autoRefreshNow.value = Date.now();
+  }, 250);
+}
+
+watch(
+  () => [autoRefresh.value?.intervalMs, autoRefresh.value?.paused, props.visible] as const,
+  startAutoRefreshTimer,
+  { immediate: true },
+);
 
 function goToPage(next: number) {
   const last = pageCount.value === null ? Infinity : pageCount.value - 1;
@@ -1184,6 +1308,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", onWindowKeydown, true);
   window.clearTimeout(applyTimer);
+  stopAutoRefreshTimer();
   cancelRunning();
   if (dirty.value) {
     emit("changes", 0);
@@ -1282,6 +1407,82 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
         </button>
       </span>
       <div class="pane-toolbar-end">
+        <div class="overflow-menu auto-refresh-menu">
+          <button
+            class="ghost tiny icon-only auto-refresh"
+            :class="{ enabled: autoRefreshOn, paused: autoRefreshPaused }"
+            type="button"
+            :title="autoRefreshTitle"
+            :aria-label="autoRefreshTitle"
+            :aria-expanded="autoRefreshMenuOpen"
+            aria-haspopup="menu"
+            @click="toggleAutoRefreshMenu"
+          >
+            <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="9" />
+              <path d="M12 7v5l3.46 2" />
+              <path d="m16.6 19.2 2.7 2.3 2.7-2.3" />
+            </svg>
+            <span v-if="autoRefreshOn || autoRefreshPaused" class="auto-refresh-dot" aria-hidden="true" />
+          </button>
+          <div v-if="autoRefreshMenuOpen" class="overflow-menu-dropdown" role="menu" aria-label="Auto refresh">
+            <button
+              class="overflow-menu-item"
+              type="button"
+              role="menuitemradio"
+              :aria-checked="autoRefreshPaused"
+              @click="pauseAutoRefresh"
+            >
+              Paused
+              <span v-if="autoRefreshPaused" class="menu-check" aria-hidden="true">✓</span>
+            </button>
+            <button
+              class="overflow-menu-item"
+              type="button"
+              role="menuitemradio"
+              :aria-checked="!autoRefresh"
+              @click="disableAutoRefresh"
+            >
+              Disabled
+              <span v-if="!autoRefresh" class="menu-check" aria-hidden="true">✓</span>
+            </button>
+            <div class="overflow-menu-divider" role="separator" />
+            <button
+              v-for="preset in AUTO_REFRESH_PRESETS"
+              :key="preset.ms"
+              class="overflow-menu-item"
+              type="button"
+              role="menuitemradio"
+              :aria-checked="autoRefreshOn && autoRefresh?.intervalMs === preset.ms"
+              @click="enableAutoRefresh(preset.ms)"
+            >
+              {{ preset.label }}
+              <span
+                v-if="autoRefreshOn && autoRefresh?.intervalMs === preset.ms"
+                class="menu-check"
+                aria-hidden="true"
+              >✓</span>
+            </button>
+            <button
+              class="overflow-menu-item"
+              type="button"
+              role="menuitem"
+              :aria-checked="autoRefreshOn && autoRefresh ? !isAutoRefreshPreset(autoRefresh.intervalMs) : false"
+              @click="openCustomRefresh"
+            >
+              {{
+                autoRefresh && !isAutoRefreshPreset(autoRefresh.intervalMs)
+                  ? formatAutoRefresh(autoRefresh.intervalMs)
+                  : "Custom…"
+              }}
+              <span
+                v-if="autoRefreshOn && autoRefresh && !isAutoRefreshPreset(autoRefresh.intervalMs)"
+                class="menu-check"
+                aria-hidden="true"
+              >✓</span>
+            </button>
+          </div>
+        </div>
         <button
           class="ghost tiny icon-only"
           type="button"
@@ -1360,7 +1561,11 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
         />
       </template>
       <div v-if="result || loading" class="table-pager-bar">
-        <span v-if="result" class="muted tiny table-load-time">Loaded in {{ result.durationMs }}ms</span>
+        <span class="muted tiny table-load-time">
+          <template v-if="result">Loaded in {{ result.durationMs }}ms</template>
+          <template v-if="result && autoRefreshRemaining"> · </template>
+          <template v-if="autoRefreshRemaining">{{ autoRefreshRemaining }}</template>
+        </span>
         <div class="table-pager-ribbon" role="navigation" aria-label="Table pages">
         <span class="muted tiny pager-label" :title="rangeTitle">{{ rangeLabel }}</span>
         <label class="pager-size" title="Rows per page">
@@ -1508,6 +1713,25 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
       :anchor="summaryAnchor"
       :hint="filterError || 'Click to edit filters (⌘F)'"
     />
+    <Modal v-if="customRefresh" title="Auto refresh" @close="customRefresh = false">
+      <form @submit.prevent="applyCustomRefresh">
+        <label class="modal-label">
+          <span class="muted tiny">Refresh every (seconds)</span>
+          <input
+            v-model.number="customRefreshSeconds"
+            type="number"
+            min="1"
+            max="3600"
+            step="1"
+            required
+          />
+        </label>
+      </form>
+      <template #actions>
+        <button class="ghost" type="button" @click="customRefresh = false">Cancel</button>
+        <button class="primary" type="button" @click="applyCustomRefresh">Set</button>
+      </template>
+    </Modal>
     <Modal v-if="sqlPreview" title="SQL for this view" wide @close="sqlPreview = null">
       <p v-if="sqlPreview.loading" class="action-progress"><span class="spinner" aria-hidden="true" /> Building SQL…</p>
       <p v-else-if="sqlPreview.error" class="settings-error">{{ sqlPreview.error }}</p>
