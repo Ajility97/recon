@@ -34,6 +34,7 @@ const {
   pageSize,
   queryRowLimit,
   maxAutoColumnWidth,
+  autoApplyFilters,
   savePreferences,
   previewPreferences,
   showToast,
@@ -172,6 +173,23 @@ function selectValue(event: Event) {
                 {{ maxAutoColumnWidth }} px
               </option>
             </select>
+          </label>
+        </div>
+        <div class="settings-row">
+          <div class="settings-row-copy">
+            <h3>Apply filters automatically</h3>
+            <p class="muted tiny">
+              Reload the rows as you edit table filters. Turn this off for very large tables to apply
+              filters only when you press Apply or ⌘↵.
+            </p>
+          </div>
+          <label class="settings-control checkbox-row">
+            <input
+              type="checkbox"
+              :checked="autoApplyFilters"
+              @change="save({ autoApplyFilters: ($event.target as HTMLInputElement).checked })"
+            />
+            <span>{{ autoApplyFilters ? "On" : "Off" }}</span>
           </label>
         </div>
       </section>

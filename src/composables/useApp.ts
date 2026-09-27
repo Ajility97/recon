@@ -39,6 +39,7 @@ const pageSize = ref(DEFAULT_PAGE_SIZE);
 const queryRowLimit = ref(DEFAULT_QUERY_ROW_LIMIT);
 const sidebarWidth = ref(260);
 const maxAutoColumnWidth = ref(DEFAULT_MAX_AUTO_COLUMN_WIDTH);
+const autoApplyFilters = ref(true);
 const windowState = ref<WindowState | null>(null);
 const toastMessage = ref("");
 const toastKind = ref<"success" | "error">("success");
@@ -85,6 +86,7 @@ export function useApp() {
     queryRowLimit.value = data.queryRowLimit ?? DEFAULT_QUERY_ROW_LIMIT;
     sidebarWidth.value = clampSidebar(data.sidebarWidth ?? 260);
     maxAutoColumnWidth.value = data.maxAutoColumnWidth ?? DEFAULT_MAX_AUTO_COLUMN_WIDTH;
+    autoApplyFilters.value = data.autoApplyFilters ?? true;
     windowState.value = data.window ?? null;
   }
 
@@ -372,6 +374,7 @@ export function useApp() {
     queryRowLimit,
     sidebarWidth,
     maxAutoColumnWidth,
+    autoApplyFilters,
     windowState,
     toastMessage,
     toastKind,

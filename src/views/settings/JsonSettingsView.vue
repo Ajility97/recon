@@ -25,6 +25,7 @@ const {
   queryRowLimit,
   sidebarWidth,
   maxAutoColumnWidth,
+  autoApplyFilters,
   windowState,
   replaceSettings,
   showToast,
@@ -208,6 +209,7 @@ watch(
     queryRowLimit,
     sidebarWidth,
     maxAutoColumnWidth,
+    autoApplyFilters,
     windowState,
   ],
   () => {
