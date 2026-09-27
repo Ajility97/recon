@@ -45,6 +45,7 @@ import type {
 } from "../types";
 import DataGrid, { type CellPosition } from "./DataGrid.vue";
 import FilterPanel from "./FilterPanel.vue";
+import FilterPopover from "./FilterPopover.vue";
 import FilterSummary from "./FilterSummary.vue";
 import Modal from "./Modal.vue";
 import TableStructure from "./TableStructure.vue";
@@ -173,6 +174,29 @@ const compiled = computed(() =>
   }),
 );
 const filterActive = computed(() => applied.value.count > 0);
+const summaryVisible = computed(() => filterActive.value && !(props.view.panelOpen && mode.value === "data"));
+const summaryAnchor = ref<DOMRect | null>(null);
+let summaryPopoverTimer = 0;
+
+function showSummaryPopover(event: MouseEvent) {
+  window.clearTimeout(summaryPopoverTimer);
+  summaryAnchor.value = (event.currentTarget as HTMLElement).getBoundingClientRect();
+}
+
+function hideSummaryPopover() {
+  window.clearTimeout(summaryPopoverTimer);
+  summaryPopoverTimer = window.setTimeout(() => {
+    summaryAnchor.value = null;
+  }, 80);
+}
+
+// Opening the panel or clearing filters hides the summary under the pointer without a mouseleave.
+watch(summaryVisible, (visible) => {
+  if (!visible) {
+    window.clearTimeout(summaryPopoverTimer);
+    summaryAnchor.value = null;
+  }
+});
 const unapplied = computed(() => !compiled.value.pending && compiled.value.key !== applied.value.key);
 const conditionCount = computed(() => allConditions(props.view.filter).filter((node) => node.column).length);
 
@@ -1171,8 +1195,12 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
         :class="{ active: view.panelOpen && mode === 'data', filtered: filterActive }"
         type="button"
         :aria-pressed="view.panelOpen && mode === 'data'"
-        :title="filterActive ? `Filtered: ${applied.summary} (⌘F)` : 'Filter rows (⌘F)'"
+        :aria-label="filterActive ? `Filter: ${applied.summary}` : 'Filter rows'"
+        aria-keyshortcuts="Meta+F"
+        :title="summaryVisible ? undefined : view.panelOpen && mode === 'data' ? 'Hide filters (⌘F)' : 'Filter rows (⌘F)'"
         @click="togglePanel"
+        @mouseenter="showSummaryPopover"
+        @mouseleave="hideSummaryPopover"
       >
         <svg class="button-icon" viewBox="0 0 16 16" aria-hidden="true">
           <path d="M2.5 3h11L9.2 8.2v4.3l-2.4 1.2V8.2L2.5 3Z" />
@@ -1181,14 +1209,16 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
         <span v-if="applied.count" class="filter-count">{{ applied.count }}</span>
       </button>
       <span
-        v-if="filterActive && !(view.panelOpen && mode === 'data')"
+        v-if="summaryVisible"
         class="table-filter"
         :class="{ error: Boolean(filterError) }"
         role="button"
         tabindex="0"
-        :title="filterError || `Showing rows where ${applied.summary}. Click to edit.`"
+        :aria-label="`Showing rows where ${applied.summary}. Click to edit.`"
         @click="openPanel(true)"
         @keydown.enter.prevent="openPanel(true)"
+        @mouseenter="showSummaryPopover"
+        @mouseleave="hideSummaryPopover"
       >
         <span class="table-filter-label">
           <FilterSummary v-if="applied.preview" :group="applied.preview" />
@@ -1385,6 +1415,13 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
         </template>
       </div>
     </Teleport>
+    <FilterPopover
+      v-if="summaryAnchor && summaryVisible && active"
+      :preview="applied.preview"
+      :count="applied.count"
+      :anchor="summaryAnchor"
+      :hint="filterError || 'Click to edit filters (⌘F)'"
+    />
     <Modal v-if="sqlPreview" title="SQL for this view" wide @close="sqlPreview = null">
       <p v-if="sqlPreview.loading" class="action-progress"><span class="spinner" aria-hidden="true" /> Building SQL…</p>
       <p v-else-if="sqlPreview.error" class="settings-error">{{ sqlPreview.error }}</p>

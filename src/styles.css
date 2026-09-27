@@ -3125,7 +3125,7 @@ button.view-tab.active:hover:not(:disabled) {
   box-shadow: 0 0 0 1.5px var(--bg);
 }
 
-.tab-filter-popover {
+.filter-summary-popover {
   position: fixed;
   z-index: 14;
   width: max-content;
@@ -3138,8 +3138,12 @@ button.view-tab.active:hover:not(:disabled) {
   pointer-events: none;
 }
 
-.tab-filter-popover-title {
+.filter-summary-popover-title {
   margin: 0 0 0.4rem 0.35rem;
+}
+
+.filter-summary-popover-hint {
+  margin: 0.45rem 0 0 0.35rem;
 }
 
 /*

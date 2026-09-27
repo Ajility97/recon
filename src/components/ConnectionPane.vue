@@ -8,7 +8,6 @@ import { SIDEBAR_MAX, SIDEBAR_MIN, useApp } from "../composables/useApp";
 import { useConnectionForm } from "../composables/useConnectionForm";
 import { registerInnerTabCloser, setLiveTitle, useTabs } from "../composables/useTabs";
 import type { FilterPreviewGroup } from "../filters/compile";
-import { placePopover, type PopoverPosition } from "../composables/usePopover";
 import {
   cloneNode,
   emptyGroup,
@@ -32,7 +31,7 @@ import ConnectionViewTabs, { type ConnectionViewTab } from "./ConnectionViewTabs
 import DatabaseSwitcher from "./DatabaseSwitcher.vue";
 import DriverIcon from "./DriverIcon.vue";
 import ExportDialog from "./ExportDialog.vue";
-import FilterPreview from "./FilterPreview.vue";
+import FilterPopover from "./FilterPopover.vue";
 import ImportDialog from "./ImportDialog.vue";
 import Modal from "./Modal.vue";
 import QueryEditor from "./QueryEditor.vue";
@@ -99,8 +98,7 @@ const activeQueryTabId = ref("");
 const tabsRestored = ref(false);
 const dirtyTabs = ref(new Map<string, number>());
 const filteredTabs = ref(new Map<string, FilterIndicator>());
-const filterPopover = ref<{ tabId: string; position: PopoverPosition } | null>(null);
-const filterPopoverEl = ref<HTMLElement | null>(null);
+const filterPopover = ref<{ tabId: string; anchor: DOMRect } | null>(null);
 let filterPopoverTimer = 0;
 const popoverFilters = computed(() =>
   filterPopover.value ? (filteredTabs.value.get(filterPopover.value.tabId) ?? null) : null,
@@ -1193,13 +1191,7 @@ function tabTooltip(tab: PaneTab) {
 /** Lists a tab's applied filters while the pointer is over its funnel icon. */
 function showFilterPopover(event: MouseEvent, tabId: string) {
   window.clearTimeout(filterPopoverTimer);
-  const anchor = (event.currentTarget as HTMLElement).getBoundingClientRect();
-  filterPopover.value = { tabId, position: { left: anchor.left, top: anchor.bottom + 6 } };
-  void nextTick(() => {
-    if (filterPopover.value?.tabId === tabId) {
-      filterPopover.value = { tabId, position: placePopover(anchor, filterPopoverEl.value, 6) };
-    }
-  });
+  filterPopover.value = { tabId, anchor: (event.currentTarget as HTMLElement).getBoundingClientRect() };
 }
 
 function hideFilterPopover() {
@@ -2228,19 +2220,13 @@ onUnmounted(() => {
             Close tabs to the right
           </button>
         </div>
-        <div
-          v-if="filterPopover && popoverFilters"
-          ref="filterPopoverEl"
-          class="tab-filter-popover"
-          role="tooltip"
-          :style="{ left: `${filterPopover.position.left}px`, top: `${filterPopover.position.top}px` }"
-        >
-          <div class="tab-filter-popover-title muted tiny">
-            {{ popoverFilters.count }} {{ popoverFilters.count === 1 ? "filter" : "filters" }} applied
-          </div>
-          <FilterPreview v-if="popoverFilters.preview" :group="popoverFilters.preview" />
-        </div>
       </Teleport>
+      <FilterPopover
+        v-if="filterPopover && popoverFilters"
+        :preview="popoverFilters.preview"
+        :count="popoverFilters.count"
+        :anchor="filterPopover.anchor"
+      />
       <Modal v-if="saveDialog" title="Save query" @close="closeSaveDialog">
         <form class="save-query-form" @submit.prevent="submitSaveDialog">
           <label class="modal-label">
