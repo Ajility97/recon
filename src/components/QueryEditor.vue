@@ -5,6 +5,7 @@ import { Compartment, EditorState, Prec } from "@codemirror/state";
 import { EditorView, keymap, placeholder } from "@codemirror/view";
 import { tags as t } from "@lezer/highlight";
 import { basicSetup } from "codemirror";
+import { format as formatSql, type SqlLanguage } from "sql-formatter";
 import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from "vue";
 import * as api from "../api";
 import { useApp } from "../composables/useApp";
@@ -61,6 +62,13 @@ const dialect = computed(() => {
     return PostgreSQL;
   }
   return props.driver === "sqlite" ? SQLite : MySQL;
+});
+
+const formatterLanguage = computed<SqlLanguage>(() => {
+  if (props.driver === "postgres") {
+    return "postgresql";
+  }
+  return props.driver === "sqlite" ? "sqlite" : "mysql";
 });
 
 const editorTheme = EditorView.theme(
@@ -311,6 +319,39 @@ function getText() {
   return view?.state.doc.toString() ?? "";
 }
 
+function beautify() {
+  if (!view) {
+    return;
+  }
+  const selection = view.state.selection.main;
+  const from = selection.empty ? 0 : selection.from;
+  const to = selection.empty ? view.state.doc.length : selection.to;
+  const source = view.state.sliceDoc(from, to);
+  if (!source.trim()) {
+    return;
+  }
+  let formatted: string;
+  try {
+    formatted = formatSql(source, {
+      language: formatterLanguage.value,
+      tabWidth: 2,
+      keywordCase: "upper",
+      linesBetweenQueries: 1,
+    });
+  } catch (err) {
+    showToast(`Couldn't format SQL: ${err instanceof Error ? err.message : String(err)}`, "error");
+    return;
+  }
+  if (formatted !== source) {
+    view.dispatch({
+      changes: { from, to, insert: formatted },
+      selection: selection.empty ? { anchor: 0 } : { anchor: from, head: from + formatted.length },
+      scrollIntoView: true,
+    });
+  }
+  view.focus();
+}
+
 async function exportSql() {
   try {
     const path = await exportSqlFile(props.title, getText());
@@ -350,12 +391,26 @@ onMounted(() => {
       { key: "Shift-Mod-Enter", run: () => (void run(true), true) },
     ]),
   );
+  const beautifyKey = Prec.highest(
+    EditorView.domEventHandlers({
+      keydown: (event) => {
+        // Option changes event.key on macOS (⇧⌥F reports "Ï"), so match the physical key.
+        if (event.code !== "KeyF" || !event.altKey || !event.shiftKey || event.metaKey || event.ctrlKey) {
+          return false;
+        }
+        event.preventDefault();
+        beautify();
+        return true;
+      },
+    }),
+  );
   view = new EditorView({
     parent: host.value,
     state: EditorState.create({
       doc: localStorage.getItem(storageId()) ?? "",
       extensions: [
         runKeys,
+        beautifyKey,
         basicSetup,
         language.of(languageExtension()),
         editorTheme,
@@ -436,6 +491,18 @@ defineExpose({ insertText, getText, focus, run });
           {{ statementCount }} {{ statementCount === 1 ? "statement" : "statements" }} ·
           {{ lastRunMs }}ms
         </span>
+        <button
+          class="ghost tiny"
+          type="button"
+          title="Format the SQL with line breaks and indentation, or just the selection (⇧⌥F)"
+          @click="beautify"
+        >
+          <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M10 4.5 11.6 9a2 2 0 0 0 1.4 1.4l4.5 1.6-4.5 1.6a2 2 0 0 0-1.4 1.4L10 19.5 8.4 15a2 2 0 0 0-1.4-1.4L2.5 12 7 10.4A2 2 0 0 0 8.4 9Z" stroke-linejoin="round" />
+            <path d="M18 3v4M16 5h4M19 16v3M17.5 17.5h3" />
+          </svg>
+          Beautify
+        </button>
         <button class="ghost tiny" type="button" title="Save the editor contents as a .sql file" @click="exportSql">
           Export .sql
         </button>

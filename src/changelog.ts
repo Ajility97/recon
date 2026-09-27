@@ -11,6 +11,7 @@ export const CHANGELOG: ChangelogRelease[] = [
     notes: [
       "Save a query tab's SQL to a .sql file with the Export .sql button at the right end of the Run bar.",
       "Right-click a saved query and choose Export .sql to save its SQL to a file.",
+      "Beautify, next to Export .sql in the Run bar, lays out a query tab's SQL with line breaks and indentation so long statements are easier to read. Select part of the SQL first to format just that part, or press Shift+Option+F.",
     ],
   },
   {
