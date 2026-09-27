@@ -28,7 +28,7 @@ const { openConnection } = useTabs();
 const { formState, closeConnectionForm } = useConnectionForm();
 
 const initial = formState.value?.connection ?? null;
-const editing = Boolean(initial);
+const editing = Boolean(initial?.id);
 
 const driver = ref<Driver>(initial?.driver ?? "mysql");
 const name = ref(initial?.name ?? "");
@@ -170,14 +170,14 @@ onMounted(async () => {
   await nextTick();
   nameInput.value?.focus();
   void loadSshKeys();
-  if (initial && initial.driver !== "sqlite" && initial.savePassword) {
+  if (initial?.id && initial.driver !== "sqlite" && initial.savePassword) {
     try {
       hasSavedPassword.value = await api.hasSavedPassword(initial.id);
     } catch {
       hasSavedPassword.value = false;
     }
   }
-  if (initial && initialSsh.enabled && initialSsh.auth !== "agent") {
+  if (initial?.id && initialSsh.enabled && initialSsh.auth !== "agent") {
     try {
       hasSavedSshSecret.value = await api.hasSavedSshSecret(initial.id);
     } catch {

@@ -28,7 +28,7 @@ const emit = defineEmits<{
 
 const { removeConnection, showToast } = useApp();
 const { activeId, hasTab, openConnection, openConnections, closeConnections } = useTabs();
-const { openEditConnection } = useConnectionForm();
+const { openEditConnection, openDuplicateConnection } = useConnectionForm();
 const { isOpen: menuOpen, toggle: toggleMenu, close: closeMenu } = useOverflowMenu(
   () => `connection:${props.connection.id}`,
 );
@@ -73,6 +73,11 @@ function handleClick(event: MouseEvent) {
 function onEdit() {
   closeMenu();
   openEditConnection(props.connection, props.groupId);
+}
+
+function onDuplicate() {
+  closeMenu();
+  openDuplicateConnection(props.connection, props.groupId);
 }
 
 async function onReveal() {
@@ -163,6 +168,9 @@ async function onRemove() {
       <div v-if="menuOpen" class="overflow-menu-dropdown" role="menu">
         <button class="overflow-menu-item" type="button" role="menuitem" @click.stop="onEdit">
           Edit connection
+        </button>
+        <button class="overflow-menu-item" type="button" role="menuitem" @click.stop="onDuplicate">
+          Duplicate connection
         </button>
         <button
           v-if="connection.driver === 'sqlite'"

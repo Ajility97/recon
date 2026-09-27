@@ -237,7 +237,10 @@ watch([groups, standaloneConnections], () => {
         @dismiss="dismissToast"
       />
     </Transition>
-    <ConnectionForm v-if="formState" :key="formState.connection?.id ?? 'new'" />
+    <ConnectionForm
+      v-if="formState"
+      :key="formState.connection?.id || (formState.connection ? `copy:${formState.connection.name}` : 'new')"
+    />
     <Modal
       v-if="promptOpen"
       title="Update available"

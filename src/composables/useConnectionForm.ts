@@ -17,9 +17,21 @@ export function useConnectionForm() {
     formState.value = { groupId, connection: { ...connection } };
   }
 
+  function openDuplicateConnection(connection: ConnectionEntry, groupId: string | null) {
+    formState.value = {
+      groupId,
+      connection: {
+        ...connection,
+        id: "",
+        name: `Copy of ${connection.name}`,
+        ssh: connection.ssh ? { ...connection.ssh } : undefined,
+      },
+    };
+  }
+
   function closeConnectionForm() {
     formState.value = null;
   }
 
-  return { formState, openNewConnection, openEditConnection, closeConnectionForm };
+  return { formState, openNewConnection, openEditConnection, openDuplicateConnection, closeConnectionForm };
 }
