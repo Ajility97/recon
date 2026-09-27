@@ -18,6 +18,9 @@ import {
   emptyGroup,
   hasConditions,
   MAX_CONDITIONS,
+  MAX_TAB_PAGE_SIZE,
+  TAB_PAGE_SIZES,
+  clampTabPageSize,
   conditions as allConditions,
   newCondition,
   newId,
@@ -82,7 +85,7 @@ const emit = defineEmits<{
   openSql: [sql: string];
 }>();
 
-const { pageSize, showToast, autoApplyFilters } = useApp();
+const { pageSize: defaultPageSize, showToast, autoApplyFilters } = useApp();
 
 /** Typing waits this long before the table reloads. */
 const APPLY_DELAY = 400;
@@ -329,6 +332,7 @@ const modified = computed(() => {
 const dirty = computed(
   () => pending.value.size > 0 || newRowIds.value.length > 0 || structureChanges.value > 0,
 );
+const refreshing = computed(() => (mode.value === "data" ? loading.value : loadingStructure.value));
 const canInsert = computed(
   () => kind.value === "table" && Boolean(result.value) && Boolean(structure.value),
 );
@@ -336,6 +340,17 @@ const canInsert = computed(
 function cellEditable(row: number) {
   return row >= rows.value.length ? canInsert.value : editable.value;
 }
+const pageSize = computed(() =>
+  clampTabPageSize(props.view.pageSize ?? Math.min(defaultPageSize.value, MAX_TAB_PAGE_SIZE)),
+);
+const pageSizeOptions = computed(() => {
+  const sizes: number[] = [...TAB_PAGE_SIZES];
+  if (!sizes.includes(pageSize.value)) {
+    sizes.push(pageSize.value);
+    sizes.sort((a, b) => a - b);
+  }
+  return sizes;
+});
 const offset = computed(() => page.value * pageSize.value);
 const pageCount = computed(() =>
   total.value === null ? null : Math.max(Math.ceil(total.value / pageSize.value), 1),
@@ -344,6 +359,10 @@ const hasNext = computed(() =>
   total.value === null
     ? rows.value.length === pageSize.value
     : offset.value + rows.value.length < total.value,
+);
+const hasPrev = computed(() => page.value > 0);
+const onlyOnePage = computed(
+  () => pageCount.value === 1 || (pageCount.value === null && !hasPrev.value && !hasNext.value),
 );
 const rangeLabel = computed(() => {
   if (!result.value) {
@@ -362,7 +381,7 @@ const rangeLabel = computed(() => {
   } else if (total.value !== null) {
     of = ` of ${total.value.toLocaleString()}`;
   }
-  return `${first.toLocaleString()}–${last.toLocaleString()}${of}`;
+  return `Rows ${first.toLocaleString()}–${last.toLocaleString()}${of}`;
 });
 const rangeTitle = computed(() =>
   countTimedOut.value
@@ -539,6 +558,18 @@ function goToPage(next: number) {
   }
   page.value = clamped;
   void loadData();
+}
+
+function setPageSize(value: number) {
+  const next = clampTabPageSize(value);
+  if (next === pageSize.value && props.view.pageSize === next) {
+    return;
+  }
+  emit("update:view", { pageSize: next });
+}
+
+function onPageSizeChange(event: Event) {
+  setPageSize(Number((event.target as HTMLSelectElement).value));
 }
 
 function onSort(column: string) {
@@ -1251,52 +1282,23 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
         </button>
       </span>
       <div class="pane-toolbar-end">
-        <span v-if="loading || loadingStructure" class="spinner" aria-label="Loading" />
-        <template v-if="mode === 'data'">
-          <span v-if="result" class="muted tiny">Loaded in {{ result.durationMs }}ms</span>
-          <span class="muted tiny pager-label" :title="rangeTitle">{{ rangeLabel }}</span>
-          <div class="pager">
-            <button
-              class="ghost tiny"
-              type="button"
-              title="First page"
-              :disabled="page === 0 || loading"
-              @click="goToPage(0)"
-            >
-              «
-            </button>
-            <button
-              class="ghost tiny"
-              type="button"
-              title="Previous page"
-              :disabled="page === 0 || loading"
-              @click="goToPage(page - 1)"
-            >
-              ‹
-            </button>
-            <span class="muted tiny pager-page">
-              Page {{ page + 1 }}<template v-if="pageCount !== null"> of {{ pageCount.toLocaleString() }}</template>
-            </span>
-            <button
-              class="ghost tiny"
-              type="button"
-              title="Next page"
-              :disabled="!hasNext || loading"
-              @click="goToPage(page + 1)"
-            >
-              ›
-            </button>
-            <button
-              class="ghost tiny"
-              type="button"
-              title="Last page"
-              :disabled="pageCount === null || page >= pageCount - 1 || loading"
-              @click="goToPage((pageCount ?? 1) - 1)"
-            >
-              »
-            </button>
-          </div>
-        </template>
+        <button
+          class="ghost tiny icon-only"
+          type="button"
+          :title="refreshing ? 'Loading…' : 'Refresh (⌘R)'"
+          :aria-label="refreshing ? 'Loading' : 'Refresh'"
+          aria-keyshortcuts="Meta+R"
+          :disabled="refreshing"
+          @click="refresh"
+        >
+          <span v-if="refreshing" class="spinner" aria-hidden="true" />
+          <svg v-else class="button-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M21 2v6h-6" />
+            <path d="M3 12a9 9 0 0 1 15.48-6.36L21 8" />
+            <path d="M3 22v-6h6" />
+            <path d="M21 12a9 9 0 0 1-15.48 6.36L3 16" />
+          </svg>
+        </button>
       </div>
     </div>
 
@@ -1321,7 +1323,11 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
       <span class="spinner" aria-hidden="true" /> Loading columns…
     </div>
 
-    <div v-show="mode === 'data'" class="table-view-body" :class="{ stale: loading && Boolean(result) }">
+    <div
+      v-show="mode === 'data'"
+      class="table-view-body"
+      :class="{ stale: loading && Boolean(result), 'has-pager': result || loading }"
+    >
       <p v-if="error" class="pane-error">{{ error }}</p>
       <template v-else-if="result">
         <div v-if="filterActive && !rows.length && !loading" class="filter-empty">
@@ -1353,6 +1359,61 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
           @header-menu="onHeaderMenu"
         />
       </template>
+      <div v-if="result || loading" class="table-pager-bar">
+        <span v-if="result" class="muted tiny table-load-time">Loaded in {{ result.durationMs }}ms</span>
+        <div class="table-pager-ribbon" role="navigation" aria-label="Table pages">
+        <span class="muted tiny pager-label" :title="rangeTitle">{{ rangeLabel }}</span>
+        <label class="pager-size" title="Rows per page">
+          <span class="visually-hidden">Rows per page</span>
+          <select :value="pageSize" :disabled="loading" @change="onPageSizeChange">
+            <option v-for="size in pageSizeOptions" :key="size" :value="size">
+              {{ size }}
+            </option>
+          </select>
+        </label>
+        <div class="pager">
+          <button
+            class="ghost tiny"
+            type="button"
+            title="First page"
+            :disabled="onlyOnePage || !hasPrev || loading"
+            @click="goToPage(0)"
+          >
+            «
+          </button>
+          <button
+            class="ghost tiny"
+            type="button"
+            title="Previous page"
+            :disabled="onlyOnePage || !hasPrev || loading"
+            @click="goToPage(page - 1)"
+          >
+            ‹
+          </button>
+          <span class="muted tiny pager-page">
+            Page {{ page + 1 }}<template v-if="pageCount !== null"> of {{ pageCount.toLocaleString() }}</template>
+          </span>
+          <button
+            class="ghost tiny"
+            type="button"
+            title="Next page"
+            :disabled="onlyOnePage || !hasNext || loading"
+            @click="goToPage(page + 1)"
+          >
+            ›
+          </button>
+          <button
+            class="ghost tiny"
+            type="button"
+            title="Last page"
+            :disabled="onlyOnePage || pageCount === null || !hasNext || loading"
+            @click="goToPage((pageCount ?? 1) - 1)"
+          >
+            »
+          </button>
+        </div>
+        </div>
+      </div>
     </div>
     <div v-show="mode !== 'data'" class="table-view-body">
       <p v-if="structureError" class="pane-error">{{ structureError }}</p>

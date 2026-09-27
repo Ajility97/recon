@@ -95,6 +95,19 @@ export interface TableViewState {
   /** `link` tabs were opened by a foreign-key arrow and their filter was never edited. */
   origin: "user" | "link";
   title?: string;
+  /** Rows this tab loads per page. Missing means the app default, capped at `MAX_TAB_PAGE_SIZE`. */
+  pageSize?: number;
+}
+
+export const TAB_PAGE_SIZES = [50, 100, 200, 300, 500] as const;
+export const MIN_TAB_PAGE_SIZE = 50;
+export const MAX_TAB_PAGE_SIZE = 500;
+
+export function clampTabPageSize(value: number) {
+  if (!Number.isFinite(value)) {
+    return MIN_TAB_PAGE_SIZE;
+  }
+  return Math.min(MAX_TAB_PAGE_SIZE, Math.max(MIN_TAB_PAGE_SIZE, Math.round(value)));
 }
 
 export const MAX_CONDITIONS = 50;

@@ -14,6 +14,7 @@ import {
   hasConditions,
   linkFilter,
   newId,
+  clampTabPageSize,
   sanitizeFilter,
   type TableViewState,
 } from "../filters/model";
@@ -396,6 +397,7 @@ function saveTableTabs() {
               panelOpen: tab.panelOpen,
               origin: tab.origin,
               title: tab.title,
+              pageSize: tab.pageSize != null ? clampTabPageSize(tab.pageSize) : undefined,
             },
           ]
         : [],
@@ -436,6 +438,10 @@ function restoredTableTab(value: unknown): TableTab | null {
     panelOpen: item.panelOpen === true,
     origin: item.origin === "link" ? "link" : "user",
     title: typeof item.title === "string" && item.title ? item.title : undefined,
+    pageSize:
+      typeof item.pageSize === "number" && Number.isFinite(item.pageSize)
+        ? clampTabPageSize(item.pageSize)
+        : undefined,
   };
 }
 
@@ -1062,9 +1068,15 @@ async function startRestore() {
   }
 }
 
+function refreshVisibleTables() {
+  for (const pane of workspace.value.panes) {
+    tableViews.get(pane.activeTabId)?.refresh();
+  }
+}
+
 function onImported() {
   void refreshAll();
-  void tableViews.get(activeTableTabId.value)?.refresh();
+  refreshVisibleTables();
 }
 
 watch(namespace, () => {
@@ -2014,7 +2026,7 @@ async function reconnect() {
     lost.value = false;
     lostError.value = "";
     await loadTables();
-    void tableViews.get(activeTableTabId.value)?.refresh();
+    refreshVisibleTables();
   } catch (err) {
     lostError.value = String(err);
   } finally {

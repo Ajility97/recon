@@ -3025,6 +3025,13 @@ button.view-tab.active:hover:not(:disabled) {
   white-space: nowrap;
 }
 
+.pane-toolbar button.icon-only {
+  position: relative;
+  min-width: 1.6rem;
+  justify-content: center;
+  padding: 0.2rem 0.35rem;
+}
+
 .pane-toolbar .button-icon {
   width: 0.9rem;
   height: 0.9rem;
@@ -3930,6 +3937,10 @@ input[type="search"].column-picker-search {
   border-color: transparent;
 }
 
+.pager button.tiny:disabled {
+  opacity: 0.28;
+}
+
 .pager-page,
 .pager-label {
   font-variant-numeric: tabular-nums;
@@ -3940,7 +3951,31 @@ input[type="search"].column-picker-search {
   padding: 0 0.3rem;
 }
 
+.pager-size {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.pager-size select {
+  height: 1.55rem;
+  min-width: 3.4rem;
+  padding: 0 0.2rem 0 0.3rem;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: #0d1016;
+  color: var(--text);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.pager-size select:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
 .table-view-body {
+  position: relative;
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -3949,6 +3984,40 @@ input[type="search"].column-picker-search {
 
 .table-view-body.scroll {
   overflow: auto;
+}
+
+.table-view-body.has-pager {
+  padding-bottom: 2.35rem;
+}
+
+.table-pager-bar {
+  position: absolute;
+  right: 0.4rem;
+  bottom: 0.3rem;
+  left: 0.4rem;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  pointer-events: none;
+}
+
+.table-load-time {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.table-pager-ribbon {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-left: auto;
+  pointer-events: auto;
 }
 
 .pane-status {
