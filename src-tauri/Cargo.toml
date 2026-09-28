@@ -1,6 +1,6 @@
 [package]
 name = "Recon"
-version = "0.6.2"
+version = "1.0.0"
 description = "A local-first database client"
 authors = ["RazorKode LLC"]
 license = "FSL-1.1-MIT"
