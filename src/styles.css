@@ -2692,11 +2692,12 @@ button.view-tab.active:hover:not(:disabled) {
   align-items: center;
   gap: 0.2rem;
   flex: 0 0 auto;
-  padding: 0.3rem 0.45rem 0.2rem;
+  /* Layout top is the visual bottom after the flip. That 1px is the ribbon line; the active tab overlaps it. */
+  padding: 1px 0.45rem 0.2rem;
   overflow-x: auto;
   overflow-y: hidden;
-  border-top: 1px solid var(--border);
   background: #0f1217;
+  box-shadow: inset 0 1px 0 var(--border);
   /* Puts the overflow scrollbar above the tabs. Children flip back so labels stay upright. */
   transform: scaleY(-1);
 }
@@ -2747,7 +2748,9 @@ button.view-tab.active:hover:not(:disabled) {
 }
 
 .subtab.active {
-  margin-bottom: -1px;
+  /* Grow over the ribbon line without shifting the label. Layout top is the visual bottom. */
+  margin-top: -1px;
+  padding-bottom: calc(0.32rem + 1px);
   border-color: var(--border);
   background: var(--bg);
   color: var(--text);
@@ -4664,6 +4667,14 @@ body.resizing-rows * {
 
 .table-pane-frame.focused .subtab-bar {
   background: #0f1217;
+}
+
+.table-pane-frame .subtab.active {
+  background: #0a0d12;
+}
+
+.table-pane-frame .subtab.active .subtab-filter-dot {
+  box-shadow: 0 0 0 1.5px #0a0d12;
 }
 
 .table-pane-frame.drop-hover .subtab-bar {
