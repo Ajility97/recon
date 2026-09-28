@@ -19,7 +19,6 @@ const props = defineProps<{
   renamingTabId: string;
   renameValue: string;
   draggingTabId: string;
-  dropAfterId: string | null;
   dropHover: boolean;
 }>();
 
@@ -68,9 +67,9 @@ function scrollPreviewIntoView() {
 }
 
 watch(
-  () => props.tabs.some((tab) => tab.preview),
-  (visible) => {
-    if (visible) {
+  () => props.tabs.findIndex((tab) => tab.preview),
+  (index) => {
+    if (index >= 0) {
       scrollPreviewIntoView();
     }
   },
@@ -94,7 +93,6 @@ watch(
           dirty: tab.dirty,
           'tab-flash': tab.flash,
           dragging: draggingTabId === tab.id,
-          'drop-after': dropAfterId === tab.id,
           'drop-preview': tab.preview,
         }"
         :data-tab-id="tab.preview ? undefined : tab.id"
