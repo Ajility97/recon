@@ -48,6 +48,7 @@ import {
   addTabToPane,
   canSplit,
   defaultSizesFor,
+  DROP_EDGE_ZONE,
   dropEdge,
   edgeToDirection,
   emptyPane,
@@ -57,6 +58,7 @@ import {
   focusPane,
   MAX_PANES,
   mergeAllPanes,
+  insertionIndex,
   moveTab,
   nextSplitDirection,
   nodeAtPath,
@@ -65,6 +67,7 @@ import {
   removeTabFromWorkspace,
   restoreWorkspace,
   splitFocused,
+  tabStripDrop,
   updateSplitSizes,
   type DropEdge,
   type SplitDirection,
@@ -131,7 +134,7 @@ const splitHost = ref<HTMLElement | null>(null);
 const flashPaneId = ref("");
 let flashPaneTimer = 0;
 const draggingTabId = ref("");
-const dropTarget = ref<{ paneId: string; afterId?: string; edge?: DropEdge } | null>(null);
+const dropTarget = ref<{ paneId: string; afterId?: string; atStart?: boolean; edge?: DropEdge } | null>(null);
 const dirtyTabs = ref(new Map<string, number>());
 const filteredTabs = ref(new Map<string, FilterIndicator>());
 const filterPopover = ref<{ tabId: string; anchor: DOMRect } | null>(null);
@@ -1305,9 +1308,19 @@ function paneTabInfos(paneId: string): PaneTabInfo[] {
     const tab = tabs.value.find((item): item is TableTab => item.id === id && item.kind === "table");
     return tab ? [tabInfo(tab)] : [];
   });
+  const place = dropPreviewPlace.value;
   const preview = dropPreviewTab.value;
-  if (preview && dropHoverPaneId.value === paneId && !infos.some((item) => item.id === preview.id)) {
-    infos.push(tabInfo(preview, true));
+  if (!place || !preview || place.paneId !== paneId) {
+    return infos;
+  }
+  const ghost: PaneTabInfo = { ...tabInfo(preview, true), id: `${preview.id}:preview` };
+  if (place.atStart) {
+    infos.unshift(ghost);
+  } else if (place.afterId) {
+    const after = infos.findIndex((item) => item.id === place.afterId);
+    infos.splice(after >= 0 ? after + 1 : infos.length, 0, ghost);
+  } else if (!infos.some((item) => item.id === preview.id)) {
+    infos.push(ghost);
   }
   return infos;
 }
@@ -1315,16 +1328,29 @@ function paneTabInfos(paneId: string): PaneTabInfo[] {
 const dropHoverPaneId = computed(() => {
   const target = dropTarget.value;
   const dragging = draggingTabId.value;
-  if (!target || !dragging || target.edge) {
+  if (!target || !dragging || target.edge || target.afterId || target.atStart) {
     return "";
   }
   const source = paneForTab(workspace.value, dragging);
   return source && source.id !== target.paneId ? target.paneId : "";
 });
 
+const dropPreviewPlace = computed(() => {
+  const target = dropTarget.value;
+  const dragging = draggingTabId.value;
+  if (!target || !dragging || target.edge) {
+    return null;
+  }
+  const source = paneForTab(workspace.value, dragging);
+  if (!source || (source.id === target.paneId && !target.afterId && !target.atStart)) {
+    return null;
+  }
+  return target;
+});
+
 const dropPreviewTab = computed(() => {
   const id = draggingTabId.value;
-  if (!id || !dropHoverPaneId.value) {
+  if (!id || !dropPreviewPlace.value) {
     return null;
   }
   const tab = tabs.value.find((item): item is TableTab => item.id === id && item.kind === "table");
@@ -1393,6 +1419,125 @@ function paneFromPoint(x: number, y: number): { paneId: string; edge?: DropEdge 
       : null;
 }
 
+/** Extra room under the tab strip so a slightly low drag still reorders instead of leaving the strip. */
+const TAB_STRIP_SLOP = 12;
+
+function tabStripAtPoint(x: number, y: number): { paneId: string; strip: HTMLElement } | null {
+  const node = document.elementFromPoint(x, y);
+  if (node instanceof Element && node.closest("[data-drop-edge]")) {
+    return null;
+  }
+  if (node instanceof Element) {
+    const strip = node.closest(".table-pane-frame .subtab-bar");
+    if (strip instanceof HTMLElement) {
+      const paneId = strip.closest<HTMLElement>(".table-pane-frame")?.dataset.paneId;
+      if (paneId) {
+        return { paneId, strip };
+      }
+    }
+  }
+  const frames = splitHost.value?.querySelectorAll<HTMLElement>(".table-pane-frame[data-pane-id]") ?? [];
+  for (const frame of frames) {
+    const paneId = frame.dataset.paneId;
+    const strip = frame.querySelector(".subtab-bar");
+    if (!paneId || !(strip instanceof HTMLElement)) {
+      continue;
+    }
+    const box = strip.getBoundingClientRect();
+    if (x >= box.left && x <= box.right && y >= box.top && y <= box.bottom + TAB_STRIP_SLOP) {
+      return { paneId, strip };
+    }
+  }
+  return null;
+}
+
+function dropOnTabStrip(paneId: string, strip: HTMLElement, x: number, tabId: string) {
+  const pane = findPane(workspace.value, paneId);
+  if (!pane) {
+    return null;
+  }
+  const preview = strip.querySelector<HTMLElement>(".subtab.drop-preview");
+  const previewBox = preview?.getBoundingClientRect();
+  const current = dropTarget.value;
+  if (
+    previewBox &&
+    current?.paneId === paneId &&
+    !current.edge &&
+    x >= previewBox.left &&
+    x <= previewBox.right
+  ) {
+    return current;
+  }
+  const ids: string[] = [];
+  const midpoints: number[] = [];
+  for (const id of pane.tabIds) {
+    const tab = strip.querySelector<HTMLElement>(`[data-tab-id="${CSS.escape(id)}"]`);
+    if (!tab) {
+      continue;
+    }
+    const box = tab.getBoundingClientRect();
+    ids.push(id);
+    midpoints.push(box.left + box.width / 2);
+  }
+  if (!ids.length) {
+    return null;
+  }
+  const place = tabStripDrop(ids, tabId, insertionIndex(midpoints, x));
+  if (!place) {
+    return null;
+  }
+  return "atStart" in place ? { paneId, atStart: true } : { paneId, afterId: place.afterId };
+}
+
+function canSplitPane(tabId: string, paneId: string) {
+  if (workspace.value.panes.length >= MAX_PANES) {
+    return false;
+  }
+  const source = paneForTab(workspace.value, tabId);
+  return Boolean(source && (source.id !== paneId || source.tabIds.length > 1));
+}
+
+function paneFrame(paneId: string) {
+  return splitHost.value?.querySelector<HTMLElement>(`.table-pane-frame[data-pane-id="${CSS.escape(paneId)}"]`) ?? null;
+}
+
+/** Full pane box, including a split preview, so the target does not jump once the preview opens. */
+function paneOuterRect(frame: HTMLElement): DOMRect {
+  const leaf = frame.closest(".split-leaf");
+  const split = leaf?.parentElement?.parentElement;
+  if (split?.classList.contains("split-node") && split.querySelector(".split-leaf-preview")) {
+    return split.getBoundingClientRect();
+  }
+  return (leaf ?? frame).getBoundingClientRect();
+}
+
+/** A drag that has left the workspace but is still beside a pane edge. */
+function dropBesidePane(x: number, y: number, tabId: string) {
+  const frames = splitHost.value?.querySelectorAll<HTMLElement>(".table-pane-frame[data-pane-id]") ?? [];
+  let best: { paneId: string; edge: DropEdge; dist: number } | null = null;
+  for (const frame of frames) {
+    const paneId = frame.dataset.paneId;
+    if (!paneId || !canSplitPane(tabId, paneId)) {
+      continue;
+    }
+    const rect = paneOuterRect(frame);
+    const dx = x < rect.left ? rect.left - x : x > rect.right ? x - rect.right : 0;
+    const dy = y < rect.top ? rect.top - y : y > rect.bottom ? y - rect.bottom : 0;
+    if ((dx === 0 && dy === 0) || dx > DROP_EDGE_ZONE || dy > DROP_EDGE_ZONE) {
+      continue;
+    }
+    if (dx > 0 && dy > 0 && Math.hypot(dx, dy) > DROP_EDGE_ZONE) {
+      continue;
+    }
+    const edge: DropEdge = dx > dy ? (x < rect.left ? "left" : "right") : y < rect.top ? "up" : "down";
+    const dist = Math.hypot(dx, dy);
+    if (!best || dist < best.dist) {
+      best = { paneId, edge, dist };
+    }
+  }
+  return best ? { paneId: best.paneId, edge: best.edge } : null;
+}
+
 function onTabPointerDown(event: PointerEvent, tabId: string) {
   if (event.button !== 0 || renamingTabId.value) {
     return;
@@ -1410,41 +1555,31 @@ function onTabPointerDown(event: PointerEvent, tabId: string) {
       draggingTabId.value = tabId;
       document.body.classList.add("dragging-tab");
     }
+    const strip = tabStripAtPoint(move.clientX, move.clientY);
+    if (strip) {
+      dropTarget.value = dropOnTabStrip(strip.paneId, strip.strip, move.clientX, tabId);
+      return;
+    }
     const hit = paneFromPoint(move.clientX, move.clientY);
     if (!hit) {
-      dropTarget.value = null;
+      dropTarget.value = dropBesidePane(move.clientX, move.clientY, tabId);
       return;
     }
     const { paneId } = hit;
-    const source = paneForTab(workspace.value, tabId);
-    const canEdge = workspace.value.panes.length < MAX_PANES;
-    const frame = splitHost.value?.querySelector<HTMLElement>(`[data-pane-id="${CSS.escape(paneId)}"]`);
-    const edge =
-      hit.edge ??
-      (canEdge && frame ? dropEdge(frame.getBoundingClientRect(), move.clientX, move.clientY) : null);
-    const splitOwnPane = source?.id === paneId && (source?.tabIds.length ?? 0) > 1;
-    if (edge && canEdge && (source?.id !== paneId || splitOwnPane)) {
+    const frame = paneFrame(paneId);
+    const rect = frame?.getBoundingClientRect();
+    let edge = hit.edge ?? null;
+    if (!edge && rect && canSplitPane(tabId, paneId)) {
+      const next = dropEdge(rect, move.clientX, move.clientY);
+      // The tab strip fills the pane's top edge, so splitting upward means dragging above the pane.
+      edge = next === "up" ? null : next;
+    }
+    if (edge && canSplitPane(tabId, paneId)) {
       dropTarget.value = { paneId, edge };
       return;
     }
-    if (source?.id !== paneId) {
-      dropTarget.value = { paneId };
-      return;
-    }
-    const node = document.elementFromPoint(move.clientX, move.clientY);
-    const tabEl = node instanceof Element ? node.closest<HTMLElement>("[data-tab-id]") : null;
-    const overId = tabEl?.dataset.tabId;
-    if (overId && overId !== tabId) {
-      const box = tabEl.getBoundingClientRect();
-      dropTarget.value = { paneId, afterId: move.clientX > box.left + box.width / 2 ? overId : undefined };
-      if (move.clientX <= box.left + box.width / 2) {
-        const pane = findPane(workspace.value, paneId);
-        const index = pane?.tabIds.indexOf(overId) ?? -1;
-        dropTarget.value = { paneId, afterId: index > 0 ? pane?.tabIds[index - 1] : undefined };
-      }
-      return;
-    }
-    dropTarget.value = { paneId };
+    const source = paneForTab(workspace.value, tabId);
+    dropTarget.value = source?.id !== paneId ? { paneId } : null;
   };
 
   const onUp = () => {
@@ -1466,7 +1601,7 @@ function onTabPointerDown(event: PointerEvent, tabId: string) {
   window.addEventListener("pointercancel", onUp);
 }
 
-function applyTabDrop(tabId: string, target: { paneId: string; afterId?: string; edge?: DropEdge }) {
+function applyTabDrop(tabId: string, target: { paneId: string; afterId?: string; atStart?: boolean; edge?: DropEdge }) {
   if (target.edge) {
     const direction = edgeToDirection(target.edge);
     if (!ensureCanSplit(direction)) {
@@ -1498,7 +1633,7 @@ function applyTabDrop(tabId: string, target: { paneId: string; afterId?: string;
     }
     return;
   }
-  workspace.value = moveTab(workspace.value, tabId, target.paneId, target.afterId);
+  workspace.value = moveTab(workspace.value, tabId, target.paneId, target.afterId, target.atStart);
   scheduleSaveTableTabs();
 }
 
@@ -2615,7 +2750,6 @@ onUnmounted(() => {
                   :renaming-tab-id="renamingTabId"
                   :rename-value="renameValue"
                   :dragging-tab-id="draggingTabId"
-                  :drop-after-id="dropTarget && dropTarget.paneId === paneId ? dropTarget.afterId ?? null : null"
                   :drop-hover="dropHoverPaneId === paneId"
                   @focus="onFocusPane(paneId)"
                   @select="(id) => { const tab = tabs.find((item) => item.id === id); if (tab) selectTab(tab); }"

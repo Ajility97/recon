@@ -10,6 +10,7 @@ export const CHANGELOG: ChangelogRelease[] = [
     date: "September 28, 2026",
     notes: [
       "The active table tab now joins the line under the tab strip instead of sitting on top of it, and in split panes it matches the grid's background.",
+      "Dragging a table tab along its tab strip reorders it. Dragging it onto the edge of a pane, or just past that edge, still splits off a new pane.",
     ],
   },
   {

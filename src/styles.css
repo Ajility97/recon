@@ -4693,10 +4693,6 @@ body.resizing-rows * {
   opacity: 0.45;
 }
 
-.subtab.drop-after {
-  box-shadow: inset -2px 0 0 var(--accent);
-}
-
 body.dragging-tab,
 body.dragging-tab * {
   cursor: grabbing !important;

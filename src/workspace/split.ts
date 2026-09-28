@@ -5,6 +5,8 @@ export const MIN_PANE_WIDTH = 320;
 export const MIN_PANE_HEIGHT = 220;
 export const SPLIT_HANDLE = 6;
 export const THREE_PANE_LEFT = 0.55;
+/** How close to a pane edge a tab drag splits off a new pane. */
+export const DROP_EDGE_ZONE = 28;
 
 export type SplitAxis = "x" | "y";
 export type SplitDirection = "right" | "down";
@@ -282,7 +284,13 @@ export function removeTabFromWorkspace(ws: TableWorkspace, tabId: string): Table
   return next;
 }
 
-export function addTabToPane(ws: TableWorkspace, paneId: string, tabId: string, afterId?: string): TableWorkspace {
+export function addTabToPane(
+  ws: TableWorkspace,
+  paneId: string,
+  tabId: string,
+  afterId?: string,
+  atStart = false,
+): TableWorkspace {
   let next = cloneWorkspace(ws);
   for (const pane of next.panes) {
     if (!pane.tabIds.includes(tabId) || pane.id === paneId) {
@@ -301,7 +309,8 @@ export function addTabToPane(ws: TableWorkspace, paneId: string, tabId: string, 
     pane.tabIds = pane.tabIds.filter((id) => id !== tabId);
   }
   const index = afterId ? pane.tabIds.indexOf(afterId) : -1;
-  pane.tabIds.splice(index >= 0 ? index + 1 : pane.tabIds.length, 0, tabId);
+  const insertAt = index >= 0 ? index + 1 : atStart ? 0 : pane.tabIds.length;
+  pane.tabIds.splice(insertAt, 0, tabId);
   pane.activeTabId = tabId;
   next.focusedPaneId = paneId;
   for (const empty of next.panes.filter((item) => !item.tabIds.length && item.id !== paneId)) {
@@ -312,8 +321,47 @@ export function addTabToPane(ws: TableWorkspace, paneId: string, tabId: string, 
   return next;
 }
 
-export function moveTab(ws: TableWorkspace, tabId: string, toPaneId: string, afterId?: string): TableWorkspace {
-  return addTabToPane(ws, toPaneId, tabId, afterId);
+export function moveTab(
+  ws: TableWorkspace,
+  tabId: string,
+  toPaneId: string,
+  afterId?: string,
+  atStart = false,
+): TableWorkspace {
+  return addTabToPane(ws, toPaneId, tabId, afterId, atStart);
+}
+
+/** Gap before `midpoints[i]`, or `midpoints.length` to land after the last tab. */
+export function insertionIndex(midpoints: number[], x: number): number {
+  for (let index = 0; index < midpoints.length; index++) {
+    if (x < midpoints[index]) {
+      return index;
+    }
+  }
+  return midpoints.length;
+}
+
+/**
+ * Where `tabId` lands when dropped at `insertAt` in a strip that still lists `tabIds`.
+ * `null` means that gap is where the tab already sits.
+ */
+export function tabStripDrop(
+  tabIds: string[],
+  tabId: string,
+  insertAt: number,
+): { atStart: true } | { afterId: string } | null {
+  const from = tabIds.indexOf(tabId);
+  if (from >= 0 && (insertAt === from || insertAt === from + 1)) {
+    return null;
+  }
+  if (insertAt <= 0) {
+    return { atStart: true };
+  }
+  const before = tabIds[Math.min(insertAt, tabIds.length) - 1];
+  if (!before || before === tabId) {
+    return null;
+  }
+  return { afterId: before };
 }
 
 export function mergeAllPanes(ws: TableWorkspace, keepActiveTabId: string): TableWorkspace {
@@ -432,7 +480,7 @@ export function canSplit(
   return { ok: true };
 }
 
-export function dropEdge(rect: DOMRect, x: number, y: number, zone = 28): DropEdge | null {
+export function dropEdge(rect: DOMRect, x: number, y: number, zone = DROP_EDGE_ZONE): DropEdge | null {
   if (x > rect.right - zone) {
     return "right";
   }
