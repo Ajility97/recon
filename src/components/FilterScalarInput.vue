@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { formatDate } from "../filters/compile";
 import type { FilterKind, FilterScalar, RelativeAnchor } from "../filters/model";
 
@@ -72,6 +72,24 @@ function onDateInput(event: Event) {
   emit("update", (event.target as HTMLInputElement).value, true);
 }
 
+/** WebKit date inputs can look filled while Vue still has an empty value. */
+function syncNativeDate() {
+  if (!isDate.value || relative.value || text.value.trim()) {
+    return;
+  }
+  const native = input.value?.value.trim();
+  if (native) {
+    emit("update", native, true);
+  }
+}
+
+onMounted(() => {
+  void nextTick(syncNativeDate);
+});
+watch([isDate, relative, text], () => {
+  void nextTick(syncNativeDate);
+});
+
 function onRelative(event: Event) {
   const anchor = (event.target as HTMLSelectElement).value as RelativeAnchor | "";
   emit("update", anchor ? { kind: "relative", anchor } : formatDate(new Date()), true);
@@ -110,6 +128,7 @@ defineExpose({ focus: () => input.value?.focus() });
         :value="dateInputValue"
         :aria-label="label"
         @input="onDateInput"
+        @change="onDateInput"
         @keydown.enter="onEnter"
       />
       <button
@@ -136,6 +155,7 @@ defineExpose({ focus: () => input.value?.focus() });
       :value="text"
       :aria-label="label"
       @input="onDateInput"
+      @change="onDateInput"
       @keydown.enter="onEnter"
     />
     <input

@@ -2724,12 +2724,14 @@ button.view-tab.active:hover:not(:disabled) {
 }
 
 .subtab {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 0.35rem;
   flex: 0 0 auto;
   max-width: 14rem;
-  padding: 0.28rem 0.3rem 0.32rem 0.6rem;
+  overflow: visible;
+  padding: 0.32rem 0.3rem 0.32rem 0.6rem;
   border: 1px solid transparent;
   border-bottom: 0;
   border-radius: 7px 7px 0 0;
@@ -3174,10 +3176,11 @@ button.view-tab.active:hover:not(:disabled) {
   color: var(--filter-blue);
 }
 
+/* Sit on the funnel so the tab strip's overflow-y: hidden does not clip the dot. */
 .subtab-filter-dot {
   position: absolute;
-  top: -0.14rem;
-  right: -0.2rem;
+  top: -1px;
+  right: -2px;
   width: 0.36rem;
   height: 0.36rem;
   border-radius: 50%;

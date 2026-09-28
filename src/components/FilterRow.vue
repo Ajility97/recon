@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref } from "vue";
-import type { FilterColumn } from "../filters/compile";
+import { formatDate, type FilterColumn } from "../filters/compile";
 import type { FilterCondition, FilterOperator, FilterValue, MatchMode } from "../filters/model";
 import {
   convertValue,
@@ -74,7 +74,8 @@ function pickColumn(name: string) {
   let { operator, value } = props.node;
   if (!props.node.column || props.column?.kind !== next.kind || !isAllowed(next.kind, operator)) {
     operator = DEFAULT_OPERATOR[next.kind];
-    value = convertValue({ type: "single", value: "" }, operator);
+    const seed = next.kind === "date" || next.kind === "datetime" ? formatDate(new Date()) : "";
+    value = convertValue({ type: "single", value: seed }, operator);
   }
   emit("change", { ...props.node, column: name, operator, value }, true);
 }

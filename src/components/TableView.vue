@@ -7,7 +7,9 @@ import { placeAtPoint, useDismiss, type PopoverPosition } from "../composables/u
 import { isBytes, isNumericColumn } from "../cells";
 import {
   compileFilter,
+  formatDate,
   normalizeFilter,
+  previewFilter,
   type CompiledFilter,
   type FilterColumn,
   type FilterPreviewGroup,
@@ -181,7 +183,16 @@ const compiled = computed(() =>
     columnsError: structureError.value || undefined,
   }),
 );
-const filterActive = computed(() => applied.value.count > 0);
+const conditionCount = computed(() => allConditions(props.view.filter).filter((node) => node.column).length);
+const filterPreview = computed(
+  () => compiled.value.preview ?? applied.value.preview ?? previewFilter(props.view.filter, columnMap.value),
+);
+const filterSummaryText = computed(() => compiled.value.summary || applied.value.summary);
+const filterCount = computed(
+  () => applied.value.count || compiled.value.appliedCount || conditionCount.value,
+);
+/** Tab icon, Filter button, and collapsed chip: any filters on this tab, not only the last applied query. */
+const filterActive = computed(() => filterCount.value > 0 || hasConditions(props.view.filter));
 const summaryVisible = computed(() => filterActive.value && !(props.view.panelOpen && mode.value === "data"));
 const summaryAnchor = ref<DOMRect | null>(null);
 let summaryPopoverTimer = 0;
@@ -206,7 +217,6 @@ watch(summaryVisible, (visible) => {
   }
 });
 const unapplied = computed(() => !compiled.value.pending && compiled.value.key !== applied.value.key);
-const conditionCount = computed(() => allConditions(props.view.filter).filter((node) => node.column).length);
 
 // First element of a new row's key, which no primary key value can equal.
 const NEW_ROW = "\u0000new";
@@ -1083,8 +1093,8 @@ watch(autoApplyFilters, (auto) => {
 });
 
 watch(
-  applied,
-  ({ count, summary, preview }) => emit("filterState", { count, summary, preview }),
+  () => ({ count: filterCount.value, summary: filterSummaryText.value, preview: filterPreview.value }),
+  (state) => emit("filterState", state),
   { immediate: true },
 );
 
@@ -1122,7 +1132,12 @@ function openPanel(focus: boolean) {
 function collapsePanel() {
   const hasBlank = conditionCount.value !== allConditions(props.view.filter).length;
   emit("update:view", hasBlank ? { panelOpen: false, filter: dropBlankConditions(props.view.filter) } : { panelOpen: false });
-  void nextTick(() => (grid.value?.$el as HTMLElement | undefined)?.focus({ preventScroll: true }));
+  void nextTick(() => {
+    if (autoApplyFilters.value && !compiled.value.pending) {
+      applyFilter();
+    }
+    (grid.value?.$el as HTMLElement | undefined)?.focus({ preventScroll: true });
+  });
 }
 
 function togglePanel() {
@@ -1245,7 +1260,8 @@ function filterOnColumn() {
     return;
   }
   const operator = DEFAULT_OPERATOR[column.kind];
-  const condition = newCondition(column.name, operator, convertValue({ type: "single", value: "" }, operator));
+  const seed = column.kind === "date" || column.kind === "datetime" ? formatDate(new Date()) : "";
+  const condition = newCondition(column.name, operator, convertValue({ type: "single", value: seed }, operator));
   addCondition(condition);
   openPanel(false);
   void nextTick(() => {
@@ -1396,7 +1412,7 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
         :class="{ active: view.panelOpen && mode === 'data', filtered: filterActive }"
         type="button"
         :aria-pressed="view.panelOpen && mode === 'data'"
-        :aria-label="filterActive ? `Filter: ${applied.summary}` : 'Filter rows'"
+        :aria-label="filterActive ? `Filter: ${filterSummaryText || 'rows'}` : 'Filter rows'"
         aria-keyshortcuts="Meta+F"
         :title="summaryVisible ? undefined : view.panelOpen && mode === 'data' ? 'Hide filters (⌘F)' : 'Filter rows (⌘F)'"
         @click="togglePanel"
@@ -1407,7 +1423,7 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
           <path d="M2.5 3h11L9.2 8.2v4.3l-2.4 1.2V8.2L2.5 3Z" />
         </svg>
         Filter
-        <span v-if="applied.count" class="filter-count">{{ applied.count }}</span>
+        <span v-if="filterCount" class="filter-count">{{ filterCount }}</span>
       </button>
       <span
         v-if="summaryVisible"
@@ -1415,15 +1431,15 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
         :class="{ error: Boolean(filterError) }"
         role="button"
         tabindex="0"
-        :aria-label="`Showing rows where ${applied.summary}. Click to edit.`"
+        :aria-label="applied.count ? `Showing rows where ${applied.summary}. Click to edit.` : `Filters: ${filterSummaryText || 'click to edit'}.`"
         @click="openPanel(true)"
         @keydown.enter.prevent="openPanel(true)"
         @mouseenter="showSummaryPopover"
         @mouseleave="hideSummaryPopover"
       >
         <span class="table-filter-label">
-          <FilterSummary v-if="applied.preview" :group="applied.preview" />
-          <template v-else>{{ applied.summary }}</template>
+          <FilterSummary v-if="filterPreview" :group="filterPreview" />
+          <template v-else>{{ filterSummaryText }}</template>
         </span>
         <button
           class="table-filter-clear"
@@ -1560,7 +1576,7 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
     >
       <p v-if="error" class="pane-error">{{ error }}</p>
       <template v-else-if="result">
-        <div v-if="filterActive && !rows.length && !loading" class="filter-empty">
+        <div v-if="applied.count && !rows.length && !loading" class="filter-empty">
           <span>No rows match these filters.</span>
           <button class="ghost tiny" type="button" @click="openPanel(true)">Edit filters</button>
           <button class="ghost tiny" type="button" @click="clearFilters">Clear filters</button>
@@ -1737,8 +1753,8 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
     </Teleport>
     <FilterPopover
       v-if="summaryAnchor && summaryVisible && active"
-      :preview="applied.preview"
-      :count="applied.count"
+      :preview="filterPreview"
+      :count="filterCount"
       :anchor="summaryAnchor"
       :hint="filterError || 'Click to edit filters (⌘F)'"
     />

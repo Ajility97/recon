@@ -1289,7 +1289,11 @@ function tabInfo(tab: TableTab, preview = false): PaneTabInfo {
     title: tabTitle(tab),
     tooltip: preview ? `${tabTitle(tab)} · drop to move here` : filterPopover.value?.tabId === tab.id ? "" : tabTooltip(tab),
     dirty: dirtyTabs.value.has(tab.id),
-    filtered: filtered ? { count: filtered.count, summary: filtered.summary } : undefined,
+    filtered: filtered
+      ? { count: filtered.count, summary: filtered.summary }
+      : hasConditions(tab.filter)
+        ? { count: 1, summary: "" }
+        : undefined,
     flash: !preview && flashTabId.value === tab.id,
     preview,
   };

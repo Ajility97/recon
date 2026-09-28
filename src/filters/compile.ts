@@ -138,6 +138,19 @@ function scalarText(value: FilterScalar): string {
   return value.kind === "absolute" ? value.value : "";
 }
 
+/** `YYYY-MM-DD`, or a typed `M/D/YYYY` that the date picker may store. */
+function parseDateText(text: string): string | null {
+  if (isValidDate(text)) {
+    return text;
+  }
+  const us = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(text);
+  if (!us) {
+    return null;
+  }
+  const iso = `${us[3]}-${pad(Number(us[1]))}-${pad(Number(us[2]))}`;
+  return isValidDate(iso) ? iso : null;
+}
+
 function datePoint(value: FilterScalar, kind: FilterKind, now: Date): DatePoint {
   if (typeof value !== "string" && value.kind === "relative") {
     return { date: anchorDate(value.anchor, now), exact: false };
@@ -146,8 +159,9 @@ function datePoint(value: FilterScalar, kind: FilterKind, now: Date): DatePoint 
   if (!text) {
     throw DRAFT;
   }
-  if (isValidDate(text)) {
-    return { date: text, exact: false };
+  const date = parseDateText(text);
+  if (date) {
+    return { date, exact: false };
   }
   const match = kind === "datetime" ? DATETIME_RE.exec(text) : null;
   if (match && isValidDate(match[1]) && Number(match[2]) < 24 && Number(match[3]) < 60 && Number(match[4] ?? 0) < 60) {
@@ -487,6 +501,43 @@ function previewRoot(root: FilterGroup, preview: FilterPreviewNode | null): Filt
     return null;
   }
   return preview.kind === "group" ? preview : { kind: "group", id: root.id, match: root.match, children: [preview] };
+}
+
+function previewCondition(node: FilterCondition, columns: Map<string, FilterColumn> | null): FilterPreviewCondition | null {
+  if (!node.enabled || !node.column) {
+    return null;
+  }
+  const kind = columns?.get(node.column)?.kind ?? "other";
+  return {
+    kind: "condition",
+    id: node.id,
+    column: node.column,
+    columnKind: kind,
+    operator: operatorLabel(kind, node.operator),
+    shortOperator: operatorShort(kind, node.operator),
+    value: valueSummary(node, kind),
+  };
+}
+
+function previewGroup(group: FilterGroup, columns: Map<string, FilterColumn> | null): FilterPreviewGroup | null {
+  if (!group.enabled) {
+    return null;
+  }
+  const children = group.children
+    .map((child) => (child.kind === "group" ? previewGroup(child, columns) : previewCondition(child, columns)))
+    .filter((child): child is FilterPreviewNode => child !== null);
+  if (!children.length) {
+    return null;
+  }
+  return { kind: "group", id: group.id, match: group.match, children };
+}
+
+/**
+ * Boxed filter chip for the toolbar and tab icon, including rows that are still
+ * drafts so a minimized panel still shows what the tab is filtering on.
+ */
+export function previewFilter(root: FilterGroup, columns: Map<string, FilterColumn> | null): FilterPreviewGroup | null {
+  return previewGroup(root, columns);
 }
 
 const TRUE_TEXT = new Set(["true", "t", "1", "yes"]);
