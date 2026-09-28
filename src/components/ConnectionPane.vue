@@ -2637,7 +2637,7 @@ onUnmounted(() => {
                       :view="tab"
                       :ref="(instance) => setTableViewRef(tab.id, instance)"
                       :active="active && view === 'tables' && workspace.focusedPaneId === paneId && findPane(workspace, paneId)?.activeTabId === tab.id"
-                      :visible="view === 'tables' && findPane(workspace, paneId)?.activeTabId === tab.id"
+                      :visible="active && view === 'tables' && findPane(workspace, paneId)?.activeTabId === tab.id"
                       @changes="setTabChanges(tab.id, $event)"
                       @follow="onTableFollow"
                       @update:view="updateView(tab.id, $event)"

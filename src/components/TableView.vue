@@ -359,10 +359,17 @@ const autoRefreshTitle = computed(() => {
 });
 let autoRefreshTimer = 0;
 let autoRefreshClock = 0;
+let viewportObserver: IntersectionObserver | undefined;
+const rootEl = ref<HTMLElement | null>(null);
+const inViewport = ref(false);
+const pageVisible = ref(typeof document === "undefined" || document.visibilityState === "visible");
 const nextRefreshAt = ref(0);
 const autoRefreshNow = ref(Date.now());
+const autoRefreshArmed = computed(
+  () => autoRefreshOn.value && props.visible !== false && inViewport.value && pageVisible.value,
+);
 const autoRefreshRemaining = computed(() => {
-  if (!autoRefreshOn.value) {
+  if (!autoRefreshArmed.value) {
     return "";
   }
   if (loading.value && mode.value === "data") {
@@ -640,6 +647,11 @@ function scheduleNextRefresh(intervalMs: number) {
 }
 
 function autoRefreshTick() {
+  if (!autoRefreshArmed.value) {
+    stopAutoRefreshTimer();
+    nextRefreshAt.value = 0;
+    return;
+  }
   const current = autoRefresh.value;
   if (current && !current.paused) {
     scheduleNextRefresh(current.intervalMs);
@@ -657,7 +669,7 @@ function autoRefreshTick() {
 function startAutoRefreshTimer() {
   stopAutoRefreshTimer();
   const current = autoRefresh.value;
-  if (!current || current.paused || props.visible === false) {
+  if (!current || current.paused || !autoRefreshArmed.value) {
     nextRefreshAt.value = 0;
     return;
   }
@@ -668,8 +680,12 @@ function startAutoRefreshTimer() {
   }, 250);
 }
 
+function onPageVisibility() {
+  pageVisible.value = document.visibilityState === "visible";
+}
+
 watch(
-  () => [autoRefresh.value?.intervalMs, autoRefresh.value?.paused, props.visible] as const,
+  () => [autoRefresh.value?.intervalMs, autoRefreshArmed.value] as const,
   startAutoRefreshTimer,
   { immediate: true },
 );
@@ -1303,10 +1319,23 @@ onMounted(() => {
   }
   void loadStructure();
   window.addEventListener("keydown", onWindowKeydown, true);
+  document.addEventListener("visibilitychange", onPageVisibility);
+  pageVisible.value = document.visibilityState === "visible";
+  if (rootEl.value) {
+    viewportObserver = new IntersectionObserver(
+      ([entry]) => {
+        inViewport.value = Boolean(entry?.isIntersecting);
+      },
+      { threshold: 0 },
+    );
+    viewportObserver.observe(rootEl.value);
+  }
 });
 
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", onWindowKeydown, true);
+  document.removeEventListener("visibilitychange", onPageVisibility);
+  viewportObserver?.disconnect();
   window.clearTimeout(applyTimer);
   stopAutoRefreshTimer();
   cancelRunning();
@@ -1319,7 +1348,7 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
 </script>
 
 <template>
-  <div class="table-view">
+  <div ref="rootEl" class="table-view">
     <div class="pane-toolbar">
       <div class="segmented" role="group" aria-label="Table view">
         <button
