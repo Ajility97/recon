@@ -213,6 +213,30 @@ export function browseTable(connectionId: string, request: BrowseRequest) {
   return invoke<BrowseResult>("browse_table", { connectionId, request });
 }
 
+/** Resolves to null when counting takes longer than `timeoutMs`. */
+export function countRows(connectionId: string, request: BrowseRequest, timeoutMs: number | null) {
+  return invoke<number | null>("count_rows", { connectionId, request, timeoutMs });
+}
+
+export function cancelBrowse(connectionId: string, requestId: string) {
+  return invoke<void>("cancel_browse", { connectionId, requestId });
+}
+
+export function previewBrowseSql(connectionId: string, request: BrowseRequest) {
+  return invoke<string>("preview_browse_sql", { connectionId, request });
+}
+
+export function distinctValues(
+  connectionId: string,
+  namespace: string,
+  table: string,
+  column: string,
+  search: string,
+  limit = 50,
+) {
+  return invoke<string[]>("distinct_values", { connectionId, namespace, table, column, search, limit });
+}
+
 export function saveTableChanges(connectionId: string, requests: SaveRequest[]) {
   return invoke<number>("save_table_changes", { connectionId, requests });
 }

@@ -36,6 +36,10 @@ fn default_max_auto_column_width() -> u32 {
     480
 }
 
+fn default_auto_apply_filters() -> bool {
+    true
+}
+
 fn default_header_color() -> String {
     "#16323c".into()
 }
@@ -283,6 +287,9 @@ pub struct AppData {
     pub sidebar_width: u32,
     #[serde(default = "default_max_auto_column_width")]
     pub max_auto_column_width: u32,
+    /// Table filters reload the rows as they're edited, instead of waiting for Apply.
+    #[serde(default = "default_auto_apply_filters")]
+    pub auto_apply_filters: bool,
     #[serde(default)]
     pub window: Option<WindowState>,
 }
@@ -303,6 +310,7 @@ impl Default for AppData {
             query_row_limit: default_query_row_limit(),
             sidebar_width: default_sidebar_width(),
             max_auto_column_width: default_max_auto_column_width(),
+            auto_apply_filters: default_auto_apply_filters(),
             window: None,
         }
     }
@@ -330,6 +338,7 @@ pub struct PreferencesPatch {
     pub query_row_limit: Option<u32>,
     pub sidebar_width: Option<u32>,
     pub max_auto_column_width: Option<u32>,
+    pub auto_apply_filters: Option<bool>,
 }
 
 #[cfg(test)]

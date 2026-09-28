@@ -1,0 +1,549 @@
+import { newId } from "../filters/model";
+
+export const MAX_PANES = 6;
+export const MIN_PANE_WIDTH = 320;
+export const MIN_PANE_HEIGHT = 220;
+export const SPLIT_HANDLE = 6;
+export const THREE_PANE_LEFT = 0.55;
+
+export type SplitAxis = "x" | "y";
+export type SplitDirection = "right" | "down";
+export type DropEdge = "left" | "right" | "up" | "down";
+
+export type SplitNode =
+  | { type: "leaf"; paneId: string }
+  | { type: "split"; axis: SplitAxis; sizes: [number, number]; children: [SplitNode, SplitNode] };
+
+export interface TablePane {
+  id: string;
+  tabIds: string[];
+  activeTabId: string;
+}
+
+export interface TableWorkspace {
+  layout: SplitNode;
+  panes: TablePane[];
+  focusedPaneId: string;
+  twoPaneAxis: SplitAxis;
+}
+
+export function newPaneId() {
+  return `pane:${newId("")}`;
+}
+
+export function emptyPane(tabIds: string[] = [], activeTabId = ""): TablePane {
+  return {
+    id: newPaneId(),
+    tabIds,
+    activeTabId: activeTabId || tabIds[0] || "",
+  };
+}
+
+export function emptyWorkspace(): TableWorkspace {
+  const pane = emptyPane();
+  return {
+    layout: { type: "leaf", paneId: pane.id },
+    panes: [pane],
+    focusedPaneId: pane.id,
+    twoPaneAxis: "x",
+  };
+}
+
+export function workspaceFromTabs(tabIds: string[], activeTabId: string): TableWorkspace {
+  const pane = emptyPane(tabIds, activeTabId || tabIds[0] || "");
+  return {
+    layout: { type: "leaf", paneId: pane.id },
+    panes: [pane],
+    focusedPaneId: pane.id,
+    twoPaneAxis: "x",
+  };
+}
+
+export function cloneNode(node: SplitNode): SplitNode {
+  if (node.type === "leaf") {
+    return { type: "leaf", paneId: node.paneId };
+  }
+  return {
+    type: "split",
+    axis: node.axis,
+    sizes: [node.sizes[0], node.sizes[1]],
+    children: [cloneNode(node.children[0]), cloneNode(node.children[1])],
+  };
+}
+
+export function cloneWorkspace(ws: TableWorkspace): TableWorkspace {
+  return {
+    layout: cloneNode(ws.layout),
+    panes: ws.panes.map((pane) => ({ id: pane.id, tabIds: [...pane.tabIds], activeTabId: pane.activeTabId })),
+    focusedPaneId: ws.focusedPaneId,
+    twoPaneAxis: ws.twoPaneAxis,
+  };
+}
+
+export function leafIds(node: SplitNode): string[] {
+  if (node.type === "leaf") {
+    return node.paneId ? [node.paneId] : [];
+  }
+  return [...leafIds(node.children[0]), ...leafIds(node.children[1])];
+}
+
+export function findPane(ws: TableWorkspace, paneId: string): TablePane | undefined {
+  return ws.panes.find((pane) => pane.id === paneId);
+}
+
+export function paneForTab(ws: TableWorkspace, tabId: string): TablePane | undefined {
+  return ws.panes.find((pane) => pane.tabIds.includes(tabId));
+}
+
+export function visibleTabIds(ws: TableWorkspace): string[] {
+  return ws.panes.map((pane) => pane.activeTabId).filter(Boolean);
+}
+
+export function focusedActiveTabId(ws: TableWorkspace): string {
+  return findPane(ws, ws.focusedPaneId)?.activeTabId ?? "";
+}
+
+export function axisSpan(node: SplitNode, axis: SplitAxis): number {
+  if (node.type === "leaf") {
+    return 1;
+  }
+  if (node.axis === axis) {
+    return axisSpan(node.children[0], axis) + axisSpan(node.children[1], axis);
+  }
+  return Math.max(axisSpan(node.children[0], axis), axisSpan(node.children[1], axis));
+}
+
+export function nodeAtPath(layout: SplitNode, path: number[]): SplitNode | null {
+  let node: SplitNode = layout;
+  for (const index of path) {
+    if (node.type === "leaf" || (index !== 0 && index !== 1)) {
+      return null;
+    }
+    node = node.children[index];
+  }
+  return node;
+}
+
+function clampPair(sizes: [number, number]): [number, number] {
+  const first = Math.min(0.85, Math.max(0.15, sizes[0] / (sizes[0] + sizes[1] || 1)));
+  return [first, 1 - first];
+}
+
+export function defaultSizesFor(node: SplitNode): [number, number] | null {
+  if (node.type !== "split") {
+    return null;
+  }
+  if (node.axis === "x" && node.children[0].type === "leaf" && node.children[1].type === "split") {
+    return [THREE_PANE_LEFT, 1 - THREE_PANE_LEFT];
+  }
+  if (node.axis === "x" && node.children[0].type === "split" && node.children[0].axis === "x") {
+    return [2 / 3, 1 / 3];
+  }
+  return [0.5, 0.5];
+}
+
+function pair(axis: SplitAxis, first: string, second: string, left = 0.5): SplitNode {
+  return {
+    type: "split",
+    axis,
+    sizes: [left, 1 - left],
+    children: [
+      { type: "leaf", paneId: first },
+      { type: "leaf", paneId: second },
+    ],
+  };
+}
+
+export function buildLayout(paneIds: string[], twoPaneAxis: SplitAxis): SplitNode {
+  if (paneIds.length <= 1) {
+    return { type: "leaf", paneId: paneIds[0] ?? "" };
+  }
+  if (paneIds.length === 2) {
+    return pair(twoPaneAxis, paneIds[0], paneIds[1]);
+  }
+  if (paneIds.length === 3) {
+    return {
+      type: "split",
+      axis: "x",
+      sizes: [THREE_PANE_LEFT, 1 - THREE_PANE_LEFT],
+      children: [{ type: "leaf", paneId: paneIds[0] }, pair("y", paneIds[1], paneIds[2])],
+    };
+  }
+  const twoByTwo: SplitNode = {
+    type: "split",
+    axis: "x",
+    sizes: [0.5, 0.5],
+    children: [pair("y", paneIds[0], paneIds[1]), pair("y", paneIds[2], paneIds[3])],
+  };
+  if (paneIds.length === 4) {
+    return twoByTwo;
+  }
+  if (paneIds.length === 5) {
+    return {
+      type: "split",
+      axis: "x",
+      sizes: [2 / 3, 1 / 3],
+      children: [twoByTwo, { type: "leaf", paneId: paneIds[4] }],
+    };
+  }
+  return {
+    type: "split",
+    axis: "x",
+    sizes: [2 / 3, 1 / 3],
+    children: [twoByTwo, pair("y", paneIds[4], paneIds[5])],
+  };
+}
+
+function orderedPaneIds(ws: TableWorkspace): string[] {
+  const known = new Set(ws.panes.map((pane) => pane.id));
+  const order = leafIds(ws.layout).filter((id) => known.has(id));
+  for (const pane of ws.panes) {
+    if (!order.includes(pane.id)) {
+      order.push(pane.id);
+    }
+  }
+  return order;
+}
+
+export function reflow(ws: TableWorkspace): TableWorkspace {
+  const next = cloneWorkspace(ws);
+  const order = orderedPaneIds(next);
+  next.layout = buildLayout(order, next.twoPaneAxis);
+  if (!next.panes.some((pane) => pane.id === next.focusedPaneId)) {
+    next.focusedPaneId = next.panes[0]?.id ?? "";
+  }
+  return next;
+}
+
+export function splitFocused(
+  ws: TableWorkspace,
+  newPane: TablePane,
+  direction: SplitDirection,
+): TableWorkspace | { error: "max" | "not-found" } {
+  if (ws.panes.length >= MAX_PANES) {
+    return { error: "max" };
+  }
+  if (!findPane(ws, ws.focusedPaneId)) {
+    return { error: "not-found" };
+  }
+  const next = cloneWorkspace(ws);
+  next.panes.push(newPane);
+  const order = orderedPaneIds(next).filter((id) => id !== newPane.id);
+  const index = order.indexOf(ws.focusedPaneId);
+  order.splice(index >= 0 ? index + 1 : order.length, 0, newPane.id);
+  if (next.panes.length === 2) {
+    next.twoPaneAxis = direction === "down" ? "y" : "x";
+  }
+  next.layout = buildLayout(order, next.twoPaneAxis);
+  next.focusedPaneId = newPane.id;
+  return next;
+}
+
+export function removePane(ws: TableWorkspace, paneId: string, mergeTabs = true): TableWorkspace {
+  if (ws.panes.length <= 1) {
+    return ws;
+  }
+  const next = cloneWorkspace(ws);
+  const order = orderedPaneIds(next);
+  const index = order.indexOf(paneId);
+  const neighborId = (index > 0 ? order[index - 1] : order[index + 1]) ?? "";
+  const closing = next.panes.find((pane) => pane.id === paneId);
+  const neighbor = next.panes.find((pane) => pane.id === neighborId);
+  if (mergeTabs && closing && neighbor) {
+    neighbor.tabIds = [...neighbor.tabIds, ...closing.tabIds.filter((id) => !neighbor.tabIds.includes(id))];
+    if (!neighbor.activeTabId) {
+      neighbor.activeTabId = closing.activeTabId;
+    }
+  }
+  next.panes = next.panes.filter((pane) => pane.id !== paneId);
+  next.layout = buildLayout(
+    order.filter((id) => id !== paneId),
+    next.twoPaneAxis,
+  );
+  next.focusedPaneId =
+    neighbor && next.panes.some((pane) => pane.id === neighbor.id) ? neighbor.id : (next.panes[0]?.id ?? "");
+  return next;
+}
+
+export function removeTabFromWorkspace(ws: TableWorkspace, tabId: string): TableWorkspace {
+  const next = cloneWorkspace(ws);
+  const pane = next.panes.find((item) => item.tabIds.includes(tabId));
+  if (!pane) {
+    return next;
+  }
+  const index = pane.tabIds.indexOf(tabId);
+  pane.tabIds = pane.tabIds.filter((id) => id !== tabId);
+  if (pane.activeTabId === tabId) {
+    pane.activeTabId = pane.tabIds[Math.min(index, pane.tabIds.length - 1)] ?? "";
+  }
+  if (!pane.tabIds.length && next.panes.length > 1) {
+    return removePane(next, pane.id, false);
+  }
+  return next;
+}
+
+export function addTabToPane(ws: TableWorkspace, paneId: string, tabId: string, afterId?: string): TableWorkspace {
+  let next = cloneWorkspace(ws);
+  for (const pane of next.panes) {
+    if (!pane.tabIds.includes(tabId) || pane.id === paneId) {
+      continue;
+    }
+    pane.tabIds = pane.tabIds.filter((id) => id !== tabId);
+    if (pane.activeTabId === tabId) {
+      pane.activeTabId = pane.tabIds[0] ?? "";
+    }
+  }
+  const pane = next.panes.find((item) => item.id === paneId);
+  if (!pane) {
+    return next;
+  }
+  if (pane.tabIds.includes(tabId)) {
+    pane.tabIds = pane.tabIds.filter((id) => id !== tabId);
+  }
+  const index = afterId ? pane.tabIds.indexOf(afterId) : -1;
+  pane.tabIds.splice(index >= 0 ? index + 1 : pane.tabIds.length, 0, tabId);
+  pane.activeTabId = tabId;
+  next.focusedPaneId = paneId;
+  for (const empty of next.panes.filter((item) => !item.tabIds.length && item.id !== paneId)) {
+    if (next.panes.length > 1) {
+      next = removePane(next, empty.id, false);
+    }
+  }
+  return next;
+}
+
+export function moveTab(ws: TableWorkspace, tabId: string, toPaneId: string, afterId?: string): TableWorkspace {
+  return addTabToPane(ws, toPaneId, tabId, afterId);
+}
+
+export function mergeAllPanes(ws: TableWorkspace, keepActiveTabId: string): TableWorkspace {
+  const seen = new Set<string>();
+  const tabIds = orderedPaneIds(ws).flatMap((id) =>
+    (findPane(ws, id)?.tabIds ?? []).filter((tabId) => {
+      if (seen.has(tabId)) {
+        return false;
+      }
+      seen.add(tabId);
+      return true;
+    }),
+  );
+  return workspaceFromTabs(tabIds, keepActiveTabId || tabIds[0] || "");
+}
+
+export function focusPane(ws: TableWorkspace, paneId: string): TableWorkspace {
+  if (ws.focusedPaneId === paneId || !ws.panes.some((pane) => pane.id === paneId)) {
+    return ws;
+  }
+  return { ...ws, focusedPaneId: paneId };
+}
+
+export function setPaneActiveTab(ws: TableWorkspace, paneId: string, tabId: string): TableWorkspace {
+  const next = cloneWorkspace(ws);
+  const pane = next.panes.find((item) => item.id === paneId);
+  if (!pane || !pane.tabIds.includes(tabId)) {
+    return ws;
+  }
+  pane.activeTabId = tabId;
+  next.focusedPaneId = paneId;
+  return next;
+}
+
+export function activateTab(ws: TableWorkspace, tabId: string): TableWorkspace {
+  const pane = paneForTab(ws, tabId);
+  return pane ? setPaneActiveTab(ws, pane.id, tabId) : ws;
+}
+
+export function nextSplitDirection(ws: TableWorkspace): SplitDirection | null {
+  if (ws.panes.length >= MAX_PANES) {
+    return null;
+  }
+  if (ws.panes.length === 1) {
+    return "right";
+  }
+  if (ws.panes.length === 2) {
+    return ws.twoPaneAxis === "x" ? "down" : "right";
+  }
+  return "right";
+}
+
+export function updateSplitSizes(layout: SplitNode, path: number[], sizes: [number, number]): SplitNode {
+  if (layout.type === "leaf") {
+    return layout;
+  }
+  if (!path.length) {
+    return { ...layout, sizes: clampPair(sizes) };
+  }
+  const [head, ...rest] = path;
+  const children: [SplitNode, SplitNode] = [layout.children[0], layout.children[1]];
+  if (head === 0 || head === 1) {
+    children[head] = updateSplitSizes(children[head], rest, sizes);
+  }
+  return { ...layout, children };
+}
+
+export function clampDragSizes(
+  axis: SplitAxis,
+  proposed: number,
+  container: number,
+  leftSpan: number,
+  rightSpan: number,
+): [number, number] {
+  const min = axis === "x" ? MIN_PANE_WIDTH : MIN_PANE_HEIGHT;
+  const available = Math.max(1, container - SPLIT_HANDLE);
+  const minLeft = min * leftSpan;
+  const minRight = min * rightSpan;
+  const minFrac = minLeft / available;
+  const maxFrac = 1 - minRight / available;
+  if (minFrac >= maxFrac) {
+    const left = minLeft / (minLeft + minRight || 1);
+    return [left, 1 - left];
+  }
+  const first = Math.min(maxFrac, Math.max(minFrac, proposed));
+  return [first, 1 - first];
+}
+
+export function canSplit(
+  width: number,
+  height: number,
+  count: number,
+  direction: SplitDirection,
+): { ok: true } | { ok: false; reason: "max" | "size" } {
+  if (count >= MAX_PANES) {
+    return { ok: false, reason: "max" };
+  }
+  const needW = MIN_PANE_WIDTH * 2 + SPLIT_HANDLE;
+  const needW3 = MIN_PANE_WIDTH * 3 + SPLIT_HANDLE * 2;
+  const needH = MIN_PANE_HEIGHT * 2 + SPLIT_HANDLE;
+  if (count <= 1) {
+    if (direction === "right" && width < needW) {
+      return { ok: false, reason: "size" };
+    }
+    if (direction === "down" && height < needH) {
+      return { ok: false, reason: "size" };
+    }
+    return { ok: true };
+  }
+  if (count >= 4 && width < needW3) {
+    return { ok: false, reason: "size" };
+  }
+  if (width < needW || height < needH) {
+    return { ok: false, reason: "size" };
+  }
+  return { ok: true };
+}
+
+export function dropEdge(rect: DOMRect, x: number, y: number, zone = 28): DropEdge | null {
+  if (x > rect.right - zone) {
+    return "right";
+  }
+  if (x < rect.left + zone) {
+    return "left";
+  }
+  if (y > rect.bottom - zone) {
+    return "down";
+  }
+  if (y < rect.top + zone) {
+    return "up";
+  }
+  return null;
+}
+
+export function edgeToDirection(edge: DropEdge): SplitDirection {
+  return edge === "down" || edge === "up" ? "down" : "right";
+}
+
+function restoreLayout(value: unknown, validPanes: Set<string>): SplitNode | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const node = value as Record<string, unknown>;
+  if (node.type === "leaf" && typeof node.paneId === "string" && validPanes.has(node.paneId)) {
+    return { type: "leaf", paneId: node.paneId };
+  }
+  if (
+    node.type === "split" &&
+    (node.axis === "x" || node.axis === "y") &&
+    Array.isArray(node.children) &&
+    node.children.length === 2
+  ) {
+    const left = restoreLayout(node.children[0], validPanes);
+    const right = restoreLayout(node.children[1], validPanes);
+    if (!left || !right) {
+      return left ?? right;
+    }
+    const raw = Array.isArray(node.sizes) ? node.sizes : [];
+    const sizes =
+      typeof raw[0] === "number" && typeof raw[1] === "number" ? clampPair([raw[0], raw[1]]) : ([0.5, 0.5] as [number, number]);
+    return { type: "split", axis: node.axis, sizes, children: [left, right] };
+  }
+  return null;
+}
+
+function layoutCovers(layout: SplitNode, paneIds: string[]): boolean {
+  const leaves = leafIds(layout);
+  if (leaves.length !== paneIds.length) {
+    return false;
+  }
+  const remaining = new Set(paneIds);
+  return leaves.every((id) => remaining.delete(id)) && remaining.size === 0;
+}
+
+export function restoreWorkspace(saved: unknown, tabIds: string[], activeTabId: string): TableWorkspace {
+  const fallback = workspaceFromTabs(tabIds, activeTabId);
+  if (!saved || typeof saved !== "object") {
+    return fallback;
+  }
+  const item = saved as Record<string, unknown>;
+  const validTabs = new Set(tabIds);
+  const panes: TablePane[] = [];
+  const seen = new Set<string>();
+  for (const raw of Array.isArray(item.panes) ? item.panes : []) {
+    if (!raw || typeof raw !== "object") {
+      continue;
+    }
+    const pane = raw as Record<string, unknown>;
+    if (typeof pane.id !== "string") {
+      continue;
+    }
+    const ids = Array.isArray(pane.tabIds)
+      ? pane.tabIds.filter((id): id is string => typeof id === "string" && validTabs.has(id) && !seen.has(id))
+      : [];
+    for (const id of ids) {
+      seen.add(id);
+    }
+    if (!ids.length && tabIds.length) {
+      continue;
+    }
+    const active =
+      typeof pane.activeTabId === "string" && ids.includes(pane.activeTabId) ? pane.activeTabId : (ids[0] ?? "");
+    panes.push({ id: pane.id, tabIds: ids, activeTabId: active });
+  }
+  const missing = tabIds.filter((id) => !seen.has(id));
+  if (missing.length) {
+    if (!panes.length) {
+      return fallback;
+    }
+    panes[0].tabIds = [...panes[0].tabIds, ...missing];
+    if (!panes[0].activeTabId) {
+      panes[0].activeTabId = activeTabId || missing[0];
+    }
+  }
+  if (!panes.length) {
+    return fallback;
+  }
+  const twoPaneAxis: SplitAxis = item.twoPaneAxis === "y" ? "y" : "x";
+  const restored = restoreLayout(
+    item.layout,
+    new Set(panes.map((pane) => pane.id)),
+  );
+  const layout =
+    restored && layoutCovers(restored, panes.map((pane) => pane.id))
+      ? restored
+      : buildLayout(panes.map((pane) => pane.id), twoPaneAxis);
+  const focusedFromTab = panes.find((pane) => pane.tabIds.includes(activeTabId))?.id;
+  const focused =
+    typeof item.focusedPaneId === "string" && panes.some((pane) => pane.id === item.focusedPaneId)
+      ? item.focusedPaneId
+      : (focusedFromTab ?? panes[0].id);
+  return { layout, panes, focusedPaneId: focused, twoPaneAxis };
+}

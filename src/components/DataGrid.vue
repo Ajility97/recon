@@ -38,6 +38,8 @@ const props = defineProps<{
   modified?: Map<number, Set<number>>;
   /** Per column, the record a value points to (such as `users.id`), or null for plain columns. */
   links?: (string | null)[];
+  /** Emits `cellMenu` and `headerMenu` on right-click instead of showing the default menu. */
+  contextMenus?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -46,8 +48,24 @@ const emit = defineEmits<{
   edit: [row: number, col: number, text: string];
   setNull: [cells: CellPosition[]];
   create: [];
-  follow: [row: number, col: number];
+  follow: [row: number, col: number, options?: { side?: boolean }];
+  cellMenu: [row: number, col: number, event: MouseEvent];
+  headerMenu: [col: number, event: MouseEvent];
 }>();
+
+function onCellContextMenu(event: MouseEvent, row: number, col: number) {
+  if (props.contextMenus && !isEditing(row, col)) {
+    event.preventDefault();
+    emit("cellMenu", row, col, event);
+  }
+}
+
+function onHeaderContextMenu(event: MouseEvent, col: number) {
+  if (props.contextMenus) {
+    event.preventDefault();
+    emit("headerMenu", col, event);
+  }
+}
 
 const { gridFontSize, maxAutoColumnWidth, showToast } = useApp();
 
@@ -228,9 +246,9 @@ function linkTarget(value: RowValues[number] | undefined, col: number) {
   return value === null || value === undefined || isBytes(value) ? null : (props.links?.[col] ?? null);
 }
 
-function follow(row: number, col: number) {
+function follow(row: number, col: number, event?: MouseEvent) {
   commitEdit();
-  emit("follow", row, col);
+  emit("follow", row, col, { side: Boolean(event?.altKey) });
 }
 
 function isAutoColumn(row: number, col: number) {
@@ -564,6 +582,33 @@ function autoSize(index: number) {
   widths.value = next;
 }
 
+/**
+ * With no rows to scroll through but columns off to the side, a vertical
+ * wheel moves the grid horizontally. Shift+wheel, horizontal trackpad
+ * gestures, and pinch zoom keep their native behavior.
+ */
+function onWheel(event: WheelEvent) {
+  const node = scroller.value;
+  if (!node || event.shiftKey || event.ctrlKey || Math.abs(event.deltaY) <= Math.abs(event.deltaX)) {
+    return;
+  }
+  if (event.target instanceof Element && event.target.closest("textarea")) {
+    return;
+  }
+  const canScrollY = node.scrollHeight - node.clientHeight > 1;
+  const canScrollX = node.scrollWidth - node.clientWidth > 1;
+  if (canScrollY || !canScrollX) {
+    return;
+  }
+  event.preventDefault();
+  const scale = event.deltaMode === WheelEvent.DOM_DELTA_LINE
+    ? rowHeight.value
+    : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+      ? node.clientWidth
+      : 1;
+  node.scrollLeft += event.deltaY * scale;
+}
+
 function scrollToTop() {
   void nextTick(() => {
     if (scroller.value) {
@@ -590,6 +635,7 @@ defineExpose({ scrollToTop, commitEdit, editCell });
     }"
     @keydown="onKeydown"
     @dblclick="onBlankDblclick"
+    @wheel="onWheel"
   >
     <div class="grid-header" role="row">
       <div class="grid-gutter grid-corner" />
@@ -605,6 +651,7 @@ defineExpose({ scrollToTop, commitEdit, editCell });
         role="columnheader"
         :title="headerTitle(column, index)"
         @click="onHeaderClick($event, column)"
+        @contextmenu="onHeaderContextMenu($event, index)"
       >
         <span class="grid-header-name">{{ column.name }}</span>
         <span v-if="sortColumn === column.name" class="grid-sort" aria-hidden="true">
@@ -651,6 +698,7 @@ defineExpose({ scrollToTop, commitEdit, editCell });
             :title="isEditing(item.index, col) ? undefined : cellTitle(value)"
             @mousedown.prevent="selectCell($event, item.index, col)"
             @dblclick.stop="startEdit(item.index, col)"
+            @contextmenu="onCellContextMenu($event, item.index, col)"
           >
             <textarea
               v-if="isEditing(item.index, col)"
@@ -674,11 +722,11 @@ defineExpose({ scrollToTop, commitEdit, editCell });
                 class="grid-link"
                 type="button"
                 tabindex="-1"
-                :title="`Open ${linkTarget(value, col)} = ${cellDisplay(value)}`"
+                :title="`Open ${linkTarget(value, col)} = ${cellDisplay(value)} · Option-click to open beside`"
                 :aria-label="`Open ${linkTarget(value, col)} = ${cellDisplay(value)}`"
                 @mousedown.stop.prevent
                 @dblclick.stop
-                @click.stop="follow(item.index, col)"
+                @click.stop="follow(item.index, col, $event)"
               >
                 <svg viewBox="0 0 16 16" aria-hidden="true">
                   <path d="M3 8h9.5M8.5 4l4 4-4 4" />

@@ -20,7 +20,7 @@ import {
 } from "../../fonts";
 import type { PreferencesPatch } from "../../types";
 
-const PAGE_SIZE_OPTIONS = [100, 200, 300, 500, 1000, 2000];
+const PAGE_SIZE_OPTIONS = [50, 100, 200, 300, 500];
 const ROW_LIMIT_OPTIONS = [1000, 5000, 10_000, 50_000, 100_000];
 const COLUMN_WIDTH_OPTIONS = [240, 320, 400, 480, 640, 800];
 
@@ -34,6 +34,7 @@ const {
   pageSize,
   queryRowLimit,
   maxAutoColumnWidth,
+  autoApplyFilters,
   savePreferences,
   previewPreferences,
   showToast,
@@ -117,7 +118,10 @@ function selectValue(event: Event) {
         <div class="settings-row">
           <div class="settings-row-copy">
             <h3>Rows per page</h3>
-            <p class="muted tiny">How many rows the Data view loads at a time when you open a table.</p>
+            <p class="muted tiny">
+              How many rows a table tab loads at a time when you open it. Each tab can pick a
+              different size, up to 500.
+            </p>
           </div>
           <label class="settings-control">
             <span class="visually-hidden">Rows per page</span>
@@ -172,6 +176,23 @@ function selectValue(event: Event) {
                 {{ maxAutoColumnWidth }} px
               </option>
             </select>
+          </label>
+        </div>
+        <div class="settings-row">
+          <div class="settings-row-copy">
+            <h3>Apply filters automatically</h3>
+            <p class="muted tiny">
+              Reload the rows as you edit table filters. Turn this off for very large tables to apply
+              filters only when you press Apply or ⌘↵.
+            </p>
+          </div>
+          <label class="settings-control checkbox-row">
+            <input
+              type="checkbox"
+              :checked="autoApplyFilters"
+              @change="save({ autoApplyFilters: ($event.target as HTMLInputElement).checked })"
+            />
+            <span>{{ autoApplyFilters ? "On" : "Off" }}</span>
           </label>
         </div>
       </section>

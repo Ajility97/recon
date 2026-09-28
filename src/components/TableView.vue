@@ -2,8 +2,42 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import * as api from "../api";
 import { useApp } from "../composables/useApp";
-import { cellDisplay, isNumericColumn } from "../cells";
+import { useOverflowMenu } from "../composables/useOverflowMenu";
+import { placeAtPoint, useDismiss, type PopoverPosition } from "../composables/usePopover";
+import { isBytes, isNumericColumn } from "../cells";
+import {
+  compileFilter,
+  formatDate,
+  normalizeFilter,
+  previewFilter,
+  type CompiledFilter,
+  type FilterColumn,
+  type FilterPreviewGroup,
+  type WireNode,
+} from "../filters/compile";
+import {
+  appendChild,
+  dropBlankConditions,
+  emptyGroup,
+  hasConditions,
+  AUTO_REFRESH_PRESETS,
+  MAX_CONDITIONS,
+  MAX_TAB_PAGE_SIZE,
+  TAB_PAGE_SIZES,
+  clampAutoRefreshMs,
+  clampTabPageSize,
+  conditions as allConditions,
+  formatAutoRefresh,
+  newCondition,
+  newId,
+  renameColumn,
+  type FilterCondition,
+  type FilterGroup,
+  type TableViewState,
+} from "../filters/model";
+import { convertValue, DEFAULT_OPERATOR } from "../filters/operators";
 import type {
+  BrowseRequest,
   BrowseResult,
   Cell,
   CellEdit,
@@ -19,6 +53,10 @@ import type {
   TableStructure as Structure,
 } from "../types";
 import DataGrid, { type CellPosition } from "./DataGrid.vue";
+import FilterPanel from "./FilterPanel.vue";
+import FilterPopover from "./FilterPopover.vue";
+import FilterSummary from "./FilterSummary.vue";
+import Modal from "./Modal.vue";
 import TableStructure from "./TableStructure.vue";
 
 interface PendingCell {
@@ -40,26 +78,52 @@ interface UndoEntry {
 
 const props = defineProps<{
   connectionId: string;
-  namespace: string;
-  table: string;
-  kind: "table" | "view";
   driver: Driver;
   active: boolean;
-  filter?: CellEdit[];
+  visible?: boolean;
+  view: TableViewState;
 }>();
 
 const emit = defineEmits<{
   changes: [rows: number];
-  follow: [link: TableLink];
-  clearFilter: [];
+  follow: [link: TableLink, options?: { side?: boolean }];
+  "update:view": [patch: Partial<TableViewState>];
+  filterState: [state: { count: number; summary: string; preview: FilterPreviewGroup | null }];
+  openSql: [sql: string];
 }>();
 
-const { pageSize, showToast } = useApp();
+const { pageSize: defaultPageSize, showToast, autoApplyFilters } = useApp();
+
+/** Typing waits this long before the table reloads. */
+const APPLY_DELAY = 400;
+const COUNT_TIMEOUT_MS = 8_000;
+
+interface AppliedFilter {
+  key: string;
+  wire: WireNode | null;
+  count: number;
+  summary: string;
+  preview: FilterPreviewGroup | null;
+}
+
+function appliedFrom(current: CompiledFilter): AppliedFilter {
+  return {
+    key: current.key,
+    wire: current.wire,
+    count: current.appliedCount,
+    summary: current.summary,
+    preview: current.preview,
+  };
+}
+
+const namespace = computed(() => props.view.namespace);
+const table = computed(() => props.view.table);
+const kind = computed(() => props.view.tableKind);
 
 const mode = ref<"data" | "structure" | "indexes">("data");
 const page = ref(0);
-const sortColumn = ref<string | null>(null);
-const sortDir = ref<SortDirection>("asc");
+const sortColumn = computed(() => props.view.sort?.column ?? null);
+const sortDir = computed<SortDirection>(() => props.view.sort?.dir ?? "asc");
 const result = shallowRef<BrowseResult | null>(null);
 const total = ref<number | null>(null);
 const structure = shallowRef<Structure | null>(null);
@@ -76,6 +140,83 @@ const redoStack: UndoEntry[] = [];
 const newRowIds = ref<number[]>([]);
 let nextNewRowId = 0;
 let requestId = 0;
+const panel = ref<InstanceType<typeof FilterPanel> | null>(null);
+const clock = ref(new Date());
+const applied = shallowRef<AppliedFilter>({ key: "", wire: null, count: 0, summary: "", preview: null });
+const filterError = ref("");
+const serverIssues = ref(new Map<string, string>());
+const counting = ref(false);
+const countTimedOut = ref(false);
+const sqlPreview = ref<{ sql: string; loading: boolean; error: string } | null>(null);
+const cellMenu = ref<{ x: number; y: number; row: number; col: number } | null>(null);
+const headerMenu = ref<{ x: number; y: number; col: number } | null>(null);
+const menuEl = ref<HTMLElement | null>(null);
+const menuPosition = ref<PopoverPosition>({ left: 0, top: 0 });
+let applyTimer = 0;
+let debounceNext = false;
+let browseToken = "";
+let countToken = "";
+const suggestionCache = new Map<string, Promise<string[]>>();
+
+const filterColumns = computed<FilterColumn[] | null>(() => {
+  if (!structure.value) {
+    return structureError.value ? [] : null;
+  }
+  const indexed = new Set(
+    structure.value.indexes.map((index) => index.columns.split(",")[0]?.trim().replace(/^[`"[]|[`"\]]$/g, "")),
+  );
+  return structure.value.columns.map((column) => ({
+    name: column.name,
+    kind: column.filterKind,
+    nullable: column.nullable,
+    enumValues: column.enumValues,
+    indexed: indexed.has(column.name),
+    dataType: column.dataType,
+  }));
+});
+const columnMap = computed(() =>
+  filterColumns.value ? new Map(filterColumns.value.map((column) => [column.name, column])) : null,
+);
+const compiled = computed(() =>
+  compileFilter(props.view.filter, columnMap.value, {
+    now: clock.value,
+    columnsError: structureError.value || undefined,
+  }),
+);
+const conditionCount = computed(() => allConditions(props.view.filter).filter((node) => node.column).length);
+const filterPreview = computed(
+  () => compiled.value.preview ?? applied.value.preview ?? previewFilter(props.view.filter, columnMap.value),
+);
+const filterSummaryText = computed(() => compiled.value.summary || applied.value.summary);
+const filterCount = computed(
+  () => applied.value.count || compiled.value.appliedCount || conditionCount.value,
+);
+/** Tab icon, Filter button, and collapsed chip: any filters on this tab, not only the last applied query. */
+const filterActive = computed(() => filterCount.value > 0 || hasConditions(props.view.filter));
+const summaryVisible = computed(() => filterActive.value && !(props.view.panelOpen && mode.value === "data"));
+const summaryAnchor = ref<DOMRect | null>(null);
+let summaryPopoverTimer = 0;
+
+function showSummaryPopover(event: MouseEvent) {
+  window.clearTimeout(summaryPopoverTimer);
+  summaryAnchor.value = (event.currentTarget as HTMLElement).getBoundingClientRect();
+}
+
+function hideSummaryPopover() {
+  window.clearTimeout(summaryPopoverTimer);
+  summaryPopoverTimer = window.setTimeout(() => {
+    summaryAnchor.value = null;
+  }, 80);
+}
+
+// Opening the panel or clearing filters hides the summary under the pointer without a mouseleave.
+watch(summaryVisible, (visible) => {
+  if (!visible) {
+    window.clearTimeout(summaryPopoverTimer);
+    summaryAnchor.value = null;
+  }
+});
+const unapplied = computed(() => !compiled.value.pending && compiled.value.key !== applied.value.key);
 
 // First element of a new row's key, which no primary key value can equal.
 const NEW_ROW = "\u0000new";
@@ -115,7 +256,7 @@ const autoColumns = computed(() => {
   );
   return columns.value.map((column) => auto.has(column.name));
 });
-const editable = computed(() => props.kind === "table" && keyIndexes.value.length > 0);
+const editable = computed(() => kind.value === "table" && keyIndexes.value.length > 0);
 const foreignKeyByColumn = computed(() => {
   const byColumn = new Map<string, ForeignKey>();
   for (const key of structure.value?.foreignKeys ?? []) {
@@ -133,15 +274,11 @@ const links = computed(() =>
     if (!key) {
       return null;
     }
-    const table = key.refNamespace && key.refNamespace !== props.namespace
+    const target = key.refNamespace && key.refNamespace !== namespace.value
       ? `${key.refNamespace}.${key.refTable}`
       : key.refTable;
-    return `${table}.${key.refColumns[key.columns.indexOf(column.name)]}`;
+    return `${target}.${key.refColumns[key.columns.indexOf(column.name)]}`;
   }),
-);
-const filterKey = computed(() => JSON.stringify(props.filter ?? []));
-const filterLabel = computed(() =>
-  (props.filter ?? []).map((cell) => `${cell.column} = ${cellDisplay(cell.value)}`).join(" and "),
 );
 function rowKey(row: RowValues | undefined): Cell[] | null {
   if (!row || !keyIndexes.value.length) {
@@ -210,13 +347,68 @@ const modified = computed(() => {
 const dirty = computed(
   () => pending.value.size > 0 || newRowIds.value.length > 0 || structureChanges.value > 0,
 );
+const refreshing = computed(() => (mode.value === "data" ? loading.value : loadingStructure.value));
+const autoRefreshMenuId = newId("ar");
+const {
+  isOpen: autoRefreshMenuOpen,
+  toggle: toggleAutoRefreshMenu,
+  close: closeAutoRefreshMenu,
+} = useOverflowMenu(() => autoRefreshMenuId);
+const customRefresh = ref(false);
+const customRefreshSeconds = ref(30);
+const autoRefresh = computed(() => props.view.autoRefresh);
+const autoRefreshOn = computed(() => Boolean(autoRefresh.value) && !autoRefresh.value?.paused);
+const autoRefreshPaused = computed(() => Boolean(autoRefresh.value?.paused));
+const autoRefreshTitle = computed(() => {
+  const current = autoRefresh.value;
+  if (!current) {
+    return "Auto refresh";
+  }
+  const every = formatAutoRefresh(current.intervalMs);
+  return current.paused ? `Auto refresh paused (${every})` : `Auto refresh every ${every}`;
+});
+let autoRefreshTimer = 0;
+let autoRefreshClock = 0;
+let viewportObserver: IntersectionObserver | undefined;
+const rootEl = ref<HTMLElement | null>(null);
+const inViewport = ref(false);
+const pageVisible = ref(typeof document === "undefined" || document.visibilityState === "visible");
+const nextRefreshAt = ref(0);
+const autoRefreshNow = ref(Date.now());
+const autoRefreshArmed = computed(
+  () => autoRefreshOn.value && props.visible !== false && inViewport.value && pageVisible.value,
+);
+const autoRefreshRemaining = computed(() => {
+  if (!autoRefreshArmed.value) {
+    return "";
+  }
+  if (loading.value && mode.value === "data") {
+    return "Refreshing…";
+  }
+  const left = Math.max(0, nextRefreshAt.value - autoRefreshNow.value);
+  if (left <= 0) {
+    return "Refreshing…";
+  }
+  return `Refreshing in ${formatAutoRefresh(Math.ceil(left / 1000) * 1000)}`;
+});
 const canInsert = computed(
-  () => props.kind === "table" && Boolean(result.value) && Boolean(structure.value),
+  () => kind.value === "table" && Boolean(result.value) && Boolean(structure.value),
 );
 
 function cellEditable(row: number) {
   return row >= rows.value.length ? canInsert.value : editable.value;
 }
+const pageSize = computed(() =>
+  clampTabPageSize(props.view.pageSize ?? Math.min(defaultPageSize.value, MAX_TAB_PAGE_SIZE)),
+);
+const pageSizeOptions = computed(() => {
+  const sizes: number[] = [...TAB_PAGE_SIZES];
+  if (!sizes.includes(pageSize.value)) {
+    sizes.push(pageSize.value);
+    sizes.sort((a, b) => a - b);
+  }
+  return sizes;
+});
 const offset = computed(() => page.value * pageSize.value);
 const pageCount = computed(() =>
   total.value === null ? null : Math.max(Math.ceil(total.value / pageSize.value), 1),
@@ -225,6 +417,10 @@ const hasNext = computed(() =>
   total.value === null
     ? rows.value.length === pageSize.value
     : offset.value + rows.value.length < total.value,
+);
+const hasPrev = computed(() => page.value > 0);
+const onlyOnePage = computed(
+  () => pageCount.value === 1 || (pageCount.value === null && !hasPrev.value && !hasNext.value),
 );
 const rangeLabel = computed(() => {
   if (!result.value) {
@@ -235,51 +431,162 @@ const rangeLabel = computed(() => {
   }
   const first = offset.value + 1;
   const last = offset.value + rows.value.length;
-  const of = total.value === null ? "" : ` of ${total.value.toLocaleString()}`;
-  return `${first.toLocaleString()}–${last.toLocaleString()}${of}`;
+  let of = "";
+  if (counting.value) {
+    of = " of …";
+  } else if (countTimedOut.value) {
+    of = " of ?";
+  } else if (total.value !== null) {
+    of = ` of ${total.value.toLocaleString()}`;
+  }
+  return `Rows ${first.toLocaleString()}–${last.toLocaleString()}${of}`;
 });
+const rangeTitle = computed(() =>
+  countTimedOut.value
+    ? "Counting the matching rows took too long, so the total is unknown. Use › to keep paging."
+    : undefined,
+);
+
+function browseRequest(extra: Partial<BrowseRequest> = {}): BrowseRequest {
+  return {
+    namespace: namespace.value,
+    table: table.value,
+    offset: offset.value,
+    limit: pageSize.value,
+    orderBy: sortColumn.value,
+    orderDir: sortColumn.value ? sortDir.value : null,
+    count: false,
+    filter: applied.value.wire,
+    utcOffset: -new Date().getTimezoneOffset(),
+    ...extra,
+  };
+}
+
+function cancelRunning() {
+  for (const token of [browseToken, countToken]) {
+    if (token) {
+      void api.cancelBrowse(props.connectionId, token).catch(() => undefined);
+    }
+  }
+  browseToken = "";
+  countToken = "";
+}
+
+/** Backend filter errors arrive as JSON naming the condition that caused them. */
+function filterErrorOf(message: string): { id: string | null; message: string } | null {
+  if (!message.startsWith('{"filterError"')) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(message) as { filterError?: { id?: string | null; message?: string } };
+    return parsed.filterError ? { id: parsed.filterError.id ?? null, message: parsed.filterError.message ?? message } : null;
+  } catch {
+    return null;
+  }
+}
+
+async function loadCount(id: number) {
+  const token = newId("n");
+  countToken = token;
+  counting.value = true;
+  countTimedOut.value = false;
+  try {
+    const next = await api.countRows(props.connectionId, browseRequest({ requestId: token }), COUNT_TIMEOUT_MS);
+    if (id === requestId) {
+      total.value = next;
+      countTimedOut.value = next === null;
+    }
+  } catch {
+    if (id === requestId) {
+      total.value = null;
+    }
+  } finally {
+    if (countToken === token) {
+      countToken = "";
+    }
+    if (id === requestId) {
+      counting.value = false;
+    }
+  }
+}
 
 async function loadData(count = false, scrollToTop = true) {
+  cancelRunning();
   const id = ++requestId;
+  const token = applied.value.wire ? newId("b") : "";
+  browseToken = token;
   loading.value = true;
   error.value = "";
+  if (count) {
+    counting.value = false;
+  }
   try {
-    const next = await api.browseTable(props.connectionId, {
-      namespace: props.namespace,
-      table: props.table,
-      offset: offset.value,
-      limit: pageSize.value,
-      orderBy: sortColumn.value,
-      orderDir: sortColumn.value ? sortDir.value : null,
-      count,
-      filter: props.filter ?? [],
-    });
+    const next = await api.browseTable(props.connectionId, browseRequest(token ? { requestId: token } : {}));
     if (id !== requestId) {
       return;
     }
     result.value = next;
-    if (count) {
-      total.value = next.total;
-    }
+    filterError.value = "";
+    serverIssues.value = new Map();
     if (scrollToTop) {
       grid.value?.scrollToTop();
     }
+    if (count) {
+      total.value = null;
+      void loadCount(id);
+    }
   } catch (err) {
-    if (id === requestId) {
-      error.value = String(err);
+    if (id !== requestId) {
+      return;
+    }
+    const message = String(err);
+    const problem = filterErrorOf(message);
+    if (problem?.id) {
+      serverIssues.value = new Map([[problem.id, problem.message]]);
+      openPanel(false);
+    } else if (problem || (applied.value.wire && result.value)) {
+      filterError.value = problem?.message ?? message;
+      openPanel(false);
+    } else {
+      error.value = message;
     }
   } finally {
+    if (browseToken === token) {
+      browseToken = "";
+    }
     if (id === requestId) {
       loading.value = false;
     }
   }
 }
 
+/** Starts using the filter as edited. Waits for the table's columns when a filter needs them. */
+function applyFilter(force = false) {
+  window.clearTimeout(applyTimer);
+  applyTimer = 0;
+  const current = compiled.value;
+  if (current.pending) {
+    return;
+  }
+  if (!force && current.key === applied.value.key && (result.value || loading.value)) {
+    return;
+  }
+  applied.value = appliedFrom(current);
+  mode.value = "data";
+  page.value = 0;
+  void loadData(true);
+}
+
+function scheduleApply(delay: number) {
+  window.clearTimeout(applyTimer);
+  applyTimer = window.setTimeout(() => applyFilter(), delay);
+}
+
 async function loadStructure() {
   loadingStructure.value = true;
   structureError.value = "";
   try {
-    structure.value = await api.tableStructure(props.connectionId, props.namespace, props.table);
+    structure.value = await api.tableStructure(props.connectionId, namespace.value, table.value);
   } catch (err) {
     structureError.value = String(err);
   } finally {
@@ -290,10 +597,108 @@ async function loadStructure() {
 function refresh() {
   if (mode.value !== "data") {
     void loadStructure();
-  } else {
-    void loadData(true);
+    return;
   }
+  clock.value = new Date();
+  void loadStructure();
+  if (autoApplyFilters.value && !compiled.value.pending) {
+    const current = compiled.value;
+    applied.value = appliedFrom(current);
+  }
+  void loadData(true, false);
 }
+
+function isAutoRefreshPreset(ms: number) {
+  return AUTO_REFRESH_PRESETS.some((preset) => preset.ms === ms);
+}
+
+function setAutoRefresh(next: TableViewState["autoRefresh"]) {
+  emit("update:view", { autoRefresh: next });
+  closeAutoRefreshMenu();
+}
+
+function pauseAutoRefresh() {
+  const current = autoRefresh.value;
+  setAutoRefresh({
+    intervalMs: current?.intervalMs ?? AUTO_REFRESH_PRESETS[1].ms,
+    paused: true,
+  });
+}
+
+function disableAutoRefresh() {
+  setAutoRefresh(undefined);
+}
+
+function enableAutoRefresh(intervalMs: number) {
+  setAutoRefresh({ intervalMs: clampAutoRefreshMs(intervalMs), paused: false });
+}
+
+function openCustomRefresh() {
+  customRefreshSeconds.value = Math.round((autoRefresh.value?.intervalMs ?? 30_000) / 1000);
+  customRefresh.value = true;
+  closeAutoRefreshMenu();
+}
+
+function applyCustomRefresh() {
+  enableAutoRefresh(customRefreshSeconds.value * 1000);
+  customRefresh.value = false;
+}
+
+function stopAutoRefreshTimer() {
+  window.clearInterval(autoRefreshTimer);
+  autoRefreshTimer = 0;
+  window.clearInterval(autoRefreshClock);
+  autoRefreshClock = 0;
+}
+
+function scheduleNextRefresh(intervalMs: number) {
+  nextRefreshAt.value = Date.now() + intervalMs;
+  autoRefreshNow.value = Date.now();
+}
+
+function autoRefreshTick() {
+  if (!autoRefreshArmed.value) {
+    stopAutoRefreshTimer();
+    nextRefreshAt.value = 0;
+    return;
+  }
+  const current = autoRefresh.value;
+  if (current && !current.paused) {
+    scheduleNextRefresh(current.intervalMs);
+  }
+  if (dirty.value || loading.value || mode.value !== "data") {
+    return;
+  }
+  clock.value = new Date();
+  if (autoApplyFilters.value && !compiled.value.pending) {
+    applied.value = appliedFrom(compiled.value);
+  }
+  void loadData(true, false);
+}
+
+function startAutoRefreshTimer() {
+  stopAutoRefreshTimer();
+  const current = autoRefresh.value;
+  if (!current || current.paused || !autoRefreshArmed.value) {
+    nextRefreshAt.value = 0;
+    return;
+  }
+  scheduleNextRefresh(current.intervalMs);
+  autoRefreshTimer = window.setInterval(autoRefreshTick, current.intervalMs);
+  autoRefreshClock = window.setInterval(() => {
+    autoRefreshNow.value = Date.now();
+  }, 250);
+}
+
+function onPageVisibility() {
+  pageVisible.value = document.visibilityState === "visible";
+}
+
+watch(
+  () => [autoRefresh.value?.intervalMs, autoRefreshArmed.value] as const,
+  startAutoRefreshTimer,
+  { immediate: true },
+);
 
 function goToPage(next: number) {
   const last = pageCount.value === null ? Infinity : pageCount.value - 1;
@@ -305,21 +710,31 @@ function goToPage(next: number) {
   void loadData();
 }
 
-function onSort(column: string) {
-  if (sortColumn.value !== column) {
-    sortColumn.value = column;
-    sortDir.value = "asc";
-  } else if (sortDir.value === "asc") {
-    sortDir.value = "desc";
-  } else {
-    sortColumn.value = null;
-    sortDir.value = "asc";
+function setPageSize(value: number) {
+  const next = clampTabPageSize(value);
+  if (next === pageSize.value && props.view.pageSize === next) {
+    return;
   }
-  page.value = 0;
-  void loadData();
+  emit("update:view", { pageSize: next });
 }
 
-function onFollow(row: number, col: number) {
+function onPageSizeChange(event: Event) {
+  setPageSize(Number((event.target as HTMLSelectElement).value));
+}
+
+function onSort(column: string) {
+  let sort: TableViewState["sort"];
+  if (sortColumn.value !== column) {
+    sort = { column, dir: "asc" };
+  } else if (sortDir.value === "asc") {
+    sort = { column, dir: "desc" };
+  } else {
+    sort = null;
+  }
+  emit("update:view", { sort });
+}
+
+function onFollow(row: number, col: number, options?: { side?: boolean }) {
   const key = foreignKeyByColumn.value.get(columns.value[col]?.name ?? "");
   const values = displayRows.value[row];
   if (!key || !values) {
@@ -334,8 +749,24 @@ function onFollow(row: number, col: number) {
     }
     filter.push({ column: key.refColumns[index], value });
   }
-  emit("follow", { namespace: key.refNamespace || props.namespace, table: key.refTable, filter });
+  emit("follow", { namespace: key.refNamespace || namespace.value, table: key.refTable, filter }, options);
 }
+
+function followFromMenu(side = false) {
+  if (!cellMenu.value) {
+    return;
+  }
+  onFollow(cellMenu.value.row, cellMenu.value.col, { side });
+  closeGridMenus();
+}
+
+const menuHasLink = computed(() => {
+  if (!cellMenu.value) {
+    return false;
+  }
+  const name = columns.value[cellMenu.value.col]?.name;
+  return Boolean(name && foreignKeyByColumn.value.has(name));
+});
 
 function parseInput(text: string, reference: Cell, column: ColumnMeta): Cell {
   const trimmed = text.trim();
@@ -488,8 +919,8 @@ function pendingChanges() {
   const cellEdits = (cells: PendingCell[]) =>
     cells.map((cell) => ({ column: cell.column, value: cell.value as EditValue }));
   const request: SaveRequest = {
-    namespace: props.namespace,
-    table: props.table,
+    namespace: namespace.value,
+    table: table.value,
     updates: rowEdits
       .filter((cells) => !isNewKey(cells[0].key))
       .map((cells) => ({
@@ -539,8 +970,15 @@ function markSaved(sent: SavedSnapshot) {
       .filter((edit) => structure.value?.columns.some((column) => column.name === edit.key))
       .map((edit) => [edit.key, String(edit.value)]),
   );
-  if (sortColumn.value && renamed.has(sortColumn.value)) {
-    sortColumn.value = renamed.get(sortColumn.value) ?? null;
+  if (renamed.size) {
+    let filter = props.view.filter;
+    for (const [from, to] of renamed) {
+      filter = renameColumn(filter, from, to);
+    }
+    const sort = props.view.sort && renamed.has(props.view.sort.column)
+      ? { ...props.view.sort, column: renamed.get(props.view.sort.column) ?? props.view.sort.column }
+      : props.view.sort;
+    emit("update:view", { filter, sort });
   }
   void loadStructure();
   void loadData(inserted.size > 0, false);
@@ -583,7 +1021,12 @@ function onWindowKeydown(event: KeyboardEvent) {
     refresh();
     return;
   }
-  if (key !== "z" || props.kind !== "table") {
+  if (key === "f" && !event.shiftKey) {
+    event.preventDefault();
+    openPanel(true);
+    return;
+  }
+  if (key !== "z" || kind.value !== "table") {
     return;
   }
   const target = event.target;
@@ -619,11 +1062,263 @@ watch(pageSize, () => {
   void loadData();
 });
 
-watch(filterKey, () => {
-  mode.value = "data";
-  page.value = 0;
-  void loadData(true);
+watch(
+  () => JSON.stringify(props.view.sort),
+  () => {
+    page.value = 0;
+    void loadData();
+  },
+);
+
+watch(
+  () => compiled.value.key,
+  () => {
+    const debounced = debounceNext;
+    debounceNext = false;
+    if (compiled.value.pending || !autoApplyFilters.value) {
+      return;
+    }
+    if (debounced) {
+      scheduleApply(APPLY_DELAY);
+    } else {
+      applyFilter();
+    }
+  },
+);
+
+watch(autoApplyFilters, (auto) => {
+  if (auto && unapplied.value) {
+    applyFilter();
+  }
 });
+
+watch(
+  () => ({ count: filterCount.value, summary: filterSummaryText.value, preview: filterPreview.value }),
+  (state) => emit("filterState", state),
+  { immediate: true },
+);
+
+watch(columnMap, (columns) => {
+  if (!columns) {
+    return;
+  }
+  const normalized = normalizeFilter(props.view.filter, columns);
+  if (normalized) {
+    emit("update:view", { filter: normalized });
+  }
+  if (!result.value && !loading.value) {
+    applyFilter(true);
+  }
+});
+
+function onFilterChange(root: FilterGroup, immediate: boolean) {
+  debounceNext = !immediate;
+  emit("update:view", { filter: root, origin: "user" });
+  void nextTick(() => {
+    debounceNext = false;
+  });
+}
+
+function openPanel(focus: boolean) {
+  if (!props.view.panelOpen) {
+    emit("update:view", { panelOpen: true });
+  }
+  mode.value = "data";
+  if (focus) {
+    void nextTick(() => panel.value?.focus());
+  }
+}
+
+function collapsePanel() {
+  const hasBlank = conditionCount.value !== allConditions(props.view.filter).length;
+  emit("update:view", hasBlank ? { panelOpen: false, filter: dropBlankConditions(props.view.filter) } : { panelOpen: false });
+  void nextTick(() => {
+    if (autoApplyFilters.value && !compiled.value.pending) {
+      applyFilter();
+    }
+    (grid.value?.$el as HTMLElement | undefined)?.focus({ preventScroll: true });
+  });
+}
+
+function togglePanel() {
+  if (props.view.panelOpen && mode.value === "data") {
+    collapsePanel();
+  } else {
+    openPanel(true);
+  }
+}
+
+function clearFilters() {
+  emit("update:view", { filter: emptyGroup(), origin: "user" });
+}
+
+function suggest(column: string, search: string) {
+  const key = `${column}\u0000${search.trim().toLowerCase()}`;
+  let request = suggestionCache.get(key);
+  if (!request) {
+    request = api
+      .distinctValues(props.connectionId, namespace.value, table.value, column, search)
+      .catch((err) => {
+        suggestionCache.delete(key);
+        throw err;
+      });
+    suggestionCache.set(key, request);
+  }
+  return request;
+}
+
+/** Adds a condition that narrows the rows, keeping an OR filter intact by nesting it. */
+function addCondition(condition: FilterCondition) {
+  const root = props.view.filter;
+  if (allConditions(root).length >= MAX_CONDITIONS) {
+    showToast(`Filters can have at most ${MAX_CONDITIONS} conditions.`, "error");
+    return;
+  }
+  const blankless = dropBlankConditions(root);
+  const next: FilterGroup = blankless.match === "all" || blankless.children.length < 2
+    ? appendChild({ ...blankless, match: "all" }, blankless.id, condition)
+    : { ...emptyGroup("all"), children: [blankless, condition] };
+  emit("update:view", { filter: next, origin: "user" });
+  void nextTick(() => panel.value?.reveal(condition.id));
+}
+
+function cellFilterValue(value: Cell): string | null {
+  if (value === null || isBytes(value)) {
+    return null;
+  }
+  return String(value);
+}
+
+const menuColumn = computed(() => {
+  const col = cellMenu.value?.col ?? headerMenu.value?.col;
+  const name = col === undefined ? undefined : columns.value[col]?.name;
+  return name ? (columnMap.value?.get(name) ?? null) : null;
+});
+const menuValue = computed<Cell | undefined>(() =>
+  cellMenu.value ? displayRows.value[cellMenu.value.row]?.[cellMenu.value.col] : undefined,
+);
+const menuValueFilterable = computed(() => {
+  const column = menuColumn.value;
+  const value = menuValue.value;
+  if (!column || value === undefined || column.kind === "binary" || column.kind === "json") {
+    return false;
+  }
+  return value === null || (!isBytes(value) && String(value).length <= 10_000);
+});
+
+function closeGridMenus() {
+  cellMenu.value = null;
+  headerMenu.value = null;
+}
+
+useDismiss(computed(() => Boolean(cellMenu.value || headerMenu.value)), () => [menuEl.value], closeGridMenus);
+
+function placeGridMenu(x: number, y: number) {
+  menuPosition.value = { left: x, top: y };
+  void nextTick(() => {
+    menuPosition.value = placeAtPoint(x, y, menuEl.value);
+  });
+}
+
+function onCellMenu(row: number, col: number, event: MouseEvent) {
+  headerMenu.value = null;
+  cellMenu.value = { x: event.clientX, y: event.clientY, row, col };
+  placeGridMenu(event.clientX, event.clientY);
+}
+
+function onHeaderMenu(col: number, event: MouseEvent) {
+  cellMenu.value = null;
+  headerMenu.value = { x: event.clientX, y: event.clientY, col };
+  placeGridMenu(event.clientX, event.clientY);
+}
+
+function filterByCell(action: "include" | "exclude" | "null" | "notNull") {
+  const column = menuColumn.value;
+  const value = menuValue.value;
+  closeGridMenus();
+  if (!column || value === undefined) {
+    return;
+  }
+  const text = cellFilterValue(value);
+  let condition: FilterCondition;
+  if (action === "null" || action === "notNull" || text === null) {
+    const isNull = action === "null" || (text === null && action === "include");
+    condition = newCondition(column.name, isNull ? "isNull" : "isNotNull", { type: "none" });
+  } else if (column.kind === "boolean") {
+    const truthy = ["true", "1", "t"].includes(text.toLowerCase());
+    condition = newCondition(column.name, truthy === (action === "include") ? "isTrue" : "isFalse", { type: "none" });
+  } else {
+    condition = newCondition(column.name, action === "include" ? "eq" : "neq", { type: "single", value: text });
+  }
+  addCondition(condition);
+}
+
+function filterOnColumn() {
+  const column = menuColumn.value;
+  closeGridMenus();
+  if (!column) {
+    return;
+  }
+  const operator = DEFAULT_OPERATOR[column.kind];
+  const seed = column.kind === "date" || column.kind === "datetime" ? formatDate(new Date()) : "";
+  const condition = newCondition(column.name, operator, convertValue({ type: "single", value: seed }, operator));
+  addCondition(condition);
+  openPanel(false);
+  void nextTick(() => {
+    const row = document.querySelector<HTMLElement>(`[data-filter-id="${CSS.escape(condition.id)}"]`);
+    const target = row?.querySelector<HTMLElement>(".filter-value input")
+      ?? row?.querySelector<HTMLElement>(".filter-value select")
+      ?? row?.querySelector<HTMLElement>(".filter-operator");
+    target?.focus();
+  });
+}
+
+function sortFromMenu(dir: SortDirection | null) {
+  const name = headerMenu.value ? columns.value[headerMenu.value.col]?.name : undefined;
+  closeGridMenus();
+  if (name) {
+    emit("update:view", { sort: dir ? { column: name, dir } : null });
+  }
+}
+
+async function showSql() {
+  sqlPreview.value = { sql: "", loading: true, error: "" };
+  const current = compiled.value;
+  try {
+    const sql = await api.previewBrowseSql(
+      props.connectionId,
+      browseRequest({ filter: current.pending ? applied.value.wire : current.wire }),
+    );
+    if (sqlPreview.value) {
+      sqlPreview.value = { sql, loading: false, error: "" };
+    }
+  } catch (err) {
+    const problem = filterErrorOf(String(err));
+    if (sqlPreview.value) {
+      sqlPreview.value = { sql: "", loading: false, error: problem?.message ?? String(err) };
+    }
+  }
+}
+
+async function copySql() {
+  if (!sqlPreview.value?.sql) {
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(sqlPreview.value.sql);
+    showToast("Copied SQL");
+  } catch (err) {
+    showToast(String(err), "error");
+  }
+}
+
+function openSqlInTab() {
+  const sql = sqlPreview.value?.sql;
+  sqlPreview.value = null;
+  if (sql) {
+    emit("openSql", `${sql};`);
+  }
+}
 
 watch(
   () =>
@@ -634,15 +1329,32 @@ watch(
 );
 
 onMounted(() => {
-  void loadData(true);
-  if (props.kind === "table") {
-    void loadStructure();
+  // A saved or linked filter needs the column types first; the columnMap watcher applies it.
+  if (!hasConditions(props.view.filter)) {
+    applyFilter(true);
   }
+  void loadStructure();
   window.addEventListener("keydown", onWindowKeydown, true);
+  document.addEventListener("visibilitychange", onPageVisibility);
+  pageVisible.value = document.visibilityState === "visible";
+  if (rootEl.value) {
+    viewportObserver = new IntersectionObserver(
+      ([entry]) => {
+        inViewport.value = Boolean(entry?.isIntersecting);
+      },
+      { threshold: 0 },
+    );
+    viewportObserver.observe(rootEl.value);
+  }
 });
 
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", onWindowKeydown, true);
+  document.removeEventListener("visibilitychange", onPageVisibility);
+  viewportObserver?.disconnect();
+  window.clearTimeout(applyTimer);
+  stopAutoRefreshTimer();
+  cancelRunning();
   if (dirty.value) {
     emit("changes", 0);
   }
@@ -652,7 +1364,7 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
 </script>
 
 <template>
-  <div class="table-view">
+  <div ref="rootEl" class="table-view">
     <div class="pane-toolbar">
       <div class="segmented" role="group" aria-label="Table view">
         <button
@@ -695,91 +1407,263 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
         </svg>
         {{ mode === "data" ? "New record" : mode === "structure" ? "New column" : "New index" }}
       </button>
-      <span v-if="filterLabel && mode === 'data'" class="table-filter" :title="`Showing rows where ${filterLabel}`">
-        <span class="table-filter-label">{{ filterLabel }}</span>
+      <button
+        class="ghost tiny filter-toggle"
+        :class="{ active: view.panelOpen && mode === 'data', filtered: filterActive }"
+        type="button"
+        :aria-pressed="view.panelOpen && mode === 'data'"
+        :aria-label="filterActive ? `Filter: ${filterSummaryText || 'rows'}` : 'Filter rows'"
+        aria-keyshortcuts="Meta+F"
+        :title="summaryVisible ? undefined : view.panelOpen && mode === 'data' ? 'Hide filters (⌘F)' : 'Filter rows (⌘F)'"
+        @click="togglePanel"
+        @mouseenter="showSummaryPopover"
+        @mouseleave="hideSummaryPopover"
+      >
+        <svg class="button-icon" viewBox="0 0 16 16" aria-hidden="true">
+          <path d="M2.5 3h11L9.2 8.2v4.3l-2.4 1.2V8.2L2.5 3Z" />
+        </svg>
+        Filter
+        <span v-if="filterCount" class="filter-count">{{ filterCount }}</span>
+      </button>
+      <span
+        v-if="summaryVisible"
+        class="table-filter"
+        :class="{ error: Boolean(filterError) }"
+        role="button"
+        tabindex="0"
+        :aria-label="applied.count ? `Showing rows where ${applied.summary}. Click to edit.` : `Filters: ${filterSummaryText || 'click to edit'}.`"
+        @click="openPanel(true)"
+        @keydown.enter.prevent="openPanel(true)"
+        @mouseenter="showSummaryPopover"
+        @mouseleave="hideSummaryPopover"
+      >
+        <span class="table-filter-label">
+          <FilterSummary v-if="filterPreview" :group="filterPreview" />
+          <template v-else>{{ filterSummaryText }}</template>
+        </span>
         <button
           class="table-filter-clear"
           type="button"
-          title="Show all rows"
-          aria-label="Clear filter and show all rows"
-          @click="emit('clearFilter')"
+          title="Clear all filters"
+          aria-label="Clear all filters and show all rows"
+          @click.stop="clearFilters"
         >
           ×
         </button>
       </span>
       <div class="pane-toolbar-end">
-        <span v-if="loading || loadingStructure" class="spinner" aria-label="Loading" />
-        <template v-if="mode === 'data'">
-          <span v-if="result" class="muted tiny">Loaded in {{ result.durationMs }}ms</span>
-          <span class="muted tiny pager-label">{{ rangeLabel }}</span>
-          <div class="pager">
+        <div class="overflow-menu auto-refresh-menu">
+          <button
+            class="ghost tiny icon-only auto-refresh"
+            :class="{ enabled: autoRefreshOn, paused: autoRefreshPaused }"
+            type="button"
+            :title="autoRefreshTitle"
+            :aria-label="autoRefreshTitle"
+            :aria-expanded="autoRefreshMenuOpen"
+            aria-haspopup="menu"
+            @click="toggleAutoRefreshMenu"
+          >
+            <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="9" />
+              <path d="M12 7v5l3.46 2" />
+              <path d="m16.6 19.2 2.7 2.3 2.7-2.3" />
+            </svg>
+            <span v-if="autoRefreshOn || autoRefreshPaused" class="auto-refresh-dot" aria-hidden="true" />
+          </button>
+          <div v-if="autoRefreshMenuOpen" class="overflow-menu-dropdown" role="menu" aria-label="Auto refresh">
             <button
-              class="ghost tiny"
+              class="overflow-menu-item"
               type="button"
-              title="First page"
-              :disabled="page === 0 || loading"
-              @click="goToPage(0)"
+              role="menuitemradio"
+              :aria-checked="autoRefreshPaused"
+              @click="pauseAutoRefresh"
             >
-              «
+              Paused
+              <span v-if="autoRefreshPaused" class="menu-check" aria-hidden="true">✓</span>
             </button>
             <button
-              class="ghost tiny"
+              class="overflow-menu-item"
               type="button"
-              title="Previous page"
-              :disabled="page === 0 || loading"
-              @click="goToPage(page - 1)"
+              role="menuitemradio"
+              :aria-checked="!autoRefresh"
+              @click="disableAutoRefresh"
             >
-              ‹
+              Disabled
+              <span v-if="!autoRefresh" class="menu-check" aria-hidden="true">✓</span>
             </button>
-            <span class="muted tiny pager-page">
-              Page {{ page + 1 }}<template v-if="pageCount !== null"> of {{ pageCount.toLocaleString() }}</template>
-            </span>
+            <div class="overflow-menu-divider" role="separator" />
             <button
-              class="ghost tiny"
+              v-for="preset in AUTO_REFRESH_PRESETS"
+              :key="preset.ms"
+              class="overflow-menu-item"
               type="button"
-              title="Next page"
-              :disabled="!hasNext || loading"
-              @click="goToPage(page + 1)"
+              role="menuitemradio"
+              :aria-checked="autoRefreshOn && autoRefresh?.intervalMs === preset.ms"
+              @click="enableAutoRefresh(preset.ms)"
             >
-              ›
+              {{ preset.label }}
+              <span
+                v-if="autoRefreshOn && autoRefresh?.intervalMs === preset.ms"
+                class="menu-check"
+                aria-hidden="true"
+              >✓</span>
             </button>
             <button
-              class="ghost tiny"
+              class="overflow-menu-item"
               type="button"
-              title="Last page"
-              :disabled="pageCount === null || page >= pageCount - 1 || loading"
-              @click="goToPage((pageCount ?? 1) - 1)"
+              role="menuitem"
+              :aria-checked="autoRefreshOn && autoRefresh ? !isAutoRefreshPreset(autoRefresh.intervalMs) : false"
+              @click="openCustomRefresh"
             >
-              »
+              {{
+                autoRefresh && !isAutoRefreshPreset(autoRefresh.intervalMs)
+                  ? formatAutoRefresh(autoRefresh.intervalMs)
+                  : "Custom…"
+              }}
+              <span
+                v-if="autoRefreshOn && autoRefresh && !isAutoRefreshPreset(autoRefresh.intervalMs)"
+                class="menu-check"
+                aria-hidden="true"
+              >✓</span>
             </button>
           </div>
-        </template>
+        </div>
+        <button
+          class="ghost tiny icon-only"
+          type="button"
+          :title="refreshing ? 'Loading…' : 'Refresh (⌘R)'"
+          :aria-label="refreshing ? 'Loading' : 'Refresh'"
+          aria-keyshortcuts="Meta+R"
+          :disabled="refreshing"
+          @click="refresh"
+        >
+          <span v-if="refreshing" class="spinner" aria-hidden="true" />
+          <svg v-else class="button-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M21 2v6h-6" />
+            <path d="M3 12a9 9 0 0 1 15.48-6.36L21 8" />
+            <path d="M3 22v-6h6" />
+            <path d="M21 12a9 9 0 0 1-15.48 6.36L3 16" />
+          </svg>
+        </button>
       </div>
     </div>
 
-    <div v-show="mode === 'data'" class="table-view-body">
+    <FilterPanel
+      v-if="view.panelOpen && mode === 'data' && filterColumns"
+      ref="panel"
+      :root="view.filter"
+      :columns="filterColumns"
+      :compiled="compiled"
+      :server-issues="serverIssues"
+      :error="filterError"
+      :auto-apply="autoApplyFilters"
+      :unapplied="unapplied"
+      :suggest="suggest"
+      @update="onFilterChange"
+      @apply="applyFilter()"
+      @collapse="collapsePanel"
+      @clear="clearFilters"
+      @show-sql="showSql"
+    />
+    <div v-else-if="view.panelOpen && mode === 'data' && loadingStructure" class="filter-panel-loading muted tiny">
+      <span class="spinner" aria-hidden="true" /> Loading columns…
+    </div>
+
+    <div
+      v-show="mode === 'data'"
+      class="table-view-body"
+      :class="{ stale: loading && Boolean(result), 'has-pager': result || loading }"
+    >
       <p v-if="error" class="pane-error">{{ error }}</p>
-      <DataGrid
-        v-else-if="result"
-        ref="grid"
-        :columns="result.columns"
-        :rows="displayRows"
-        :row-number-offset="offset"
-        sortable
-        :sort-column="sortColumn"
-        :sort-dir="sortDir"
-        :cell-editable="cellEditable"
-        :new-row-start="rows.length"
-        :new-row-auto="autoColumns"
-        :creatable="canInsert"
-        :modified="modified"
-        :links="links"
-        @sort="onSort"
-        @edit="onEdit"
-        @set-null="onSetNull"
-        @create="createRecord"
-        @follow="onFollow"
-      />
+      <template v-else-if="result">
+        <div v-if="applied.count && !rows.length && !loading" class="filter-empty">
+          <span>No rows match these filters.</span>
+          <button class="ghost tiny" type="button" @click="openPanel(true)">Edit filters</button>
+          <button class="ghost tiny" type="button" @click="clearFilters">Clear filters</button>
+        </div>
+        <DataGrid
+          ref="grid"
+          :columns="result.columns"
+          :rows="displayRows"
+          :row-number-offset="offset"
+          sortable
+          :sort-column="sortColumn"
+          :sort-dir="sortDir"
+          :cell-editable="cellEditable"
+          :new-row-start="rows.length"
+          :new-row-auto="autoColumns"
+          :creatable="canInsert"
+          :modified="modified"
+          :links="links"
+          context-menus
+          @sort="onSort"
+          @edit="onEdit"
+          @set-null="onSetNull"
+          @create="createRecord"
+          @follow="onFollow"
+          @cell-menu="onCellMenu"
+          @header-menu="onHeaderMenu"
+        />
+      </template>
+      <div v-if="result || loading" class="table-pager-bar">
+        <span class="muted tiny table-load-time">
+          <template v-if="result">Loaded in {{ result.durationMs }}ms</template>
+          <template v-if="result && autoRefreshRemaining"> · </template>
+          <template v-if="autoRefreshRemaining">{{ autoRefreshRemaining }}</template>
+        </span>
+        <div class="table-pager-ribbon" role="navigation" aria-label="Table pages">
+        <span class="muted tiny pager-label" :title="rangeTitle">{{ rangeLabel }}</span>
+        <label class="pager-size" title="Rows per page">
+          <span class="visually-hidden">Rows per page</span>
+          <select :value="pageSize" :disabled="loading" @change="onPageSizeChange">
+            <option v-for="size in pageSizeOptions" :key="size" :value="size">
+              {{ size }}
+            </option>
+          </select>
+        </label>
+        <div class="pager">
+          <button
+            class="ghost tiny"
+            type="button"
+            title="First page"
+            :disabled="onlyOnePage || !hasPrev || loading"
+            @click="goToPage(0)"
+          >
+            «
+          </button>
+          <button
+            class="ghost tiny"
+            type="button"
+            title="Previous page"
+            :disabled="onlyOnePage || !hasPrev || loading"
+            @click="goToPage(page - 1)"
+          >
+            ‹
+          </button>
+          <span class="muted tiny pager-page">
+            Page {{ page + 1 }}<template v-if="pageCount !== null"> of {{ pageCount.toLocaleString() }}</template>
+          </span>
+          <button
+            class="ghost tiny"
+            type="button"
+            title="Next page"
+            :disabled="onlyOnePage || !hasNext || loading"
+            @click="goToPage(page + 1)"
+          >
+            ›
+          </button>
+          <button
+            class="ghost tiny"
+            type="button"
+            title="Last page"
+            :disabled="onlyOnePage || pageCount === null || !hasNext || loading"
+            @click="goToPage((pageCount ?? 1) - 1)"
+          >
+            »
+          </button>
+        </div>
+        </div>
+      </div>
     </div>
     <div v-show="mode !== 'data'" class="table-view-body">
       <p v-if="structureError" class="pane-error">{{ structureError }}</p>
@@ -793,5 +1677,118 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
         @changes="structureChanges = $event"
       />
     </div>
+    <Teleport to="body">
+      <div
+        v-if="cellMenu || headerMenu"
+        ref="menuEl"
+        class="overflow-menu-dropdown table-context-menu"
+        role="menu"
+        :style="{ left: `${menuPosition.left}px`, top: `${menuPosition.top}px` }"
+        @contextmenu.prevent
+      >
+        <template v-if="cellMenu">
+          <button
+            class="overflow-menu-item"
+            type="button"
+            role="menuitem"
+            :disabled="!menuValueFilterable"
+            @click="filterByCell('include')"
+          >
+            Filter by this value
+          </button>
+          <button
+            class="overflow-menu-item"
+            type="button"
+            role="menuitem"
+            :disabled="!menuValueFilterable"
+            @click="filterByCell('exclude')"
+          >
+            Exclude this value
+          </button>
+          <div class="overflow-menu-divider" role="separator" />
+          <button
+            class="overflow-menu-item"
+            type="button"
+            role="menuitem"
+            :disabled="!menuColumn"
+            @click="filterByCell('null')"
+          >
+            Filter where {{ menuColumn?.name ?? "column" }} is NULL
+          </button>
+          <button
+            class="overflow-menu-item"
+            type="button"
+            role="menuitem"
+            :disabled="!menuColumn"
+            @click="filterByCell('notNull')"
+          >
+            Filter where {{ menuColumn?.name ?? "column" }} is not NULL
+          </button>
+          <template v-if="menuHasLink">
+            <div class="overflow-menu-divider" role="separator" />
+            <button class="overflow-menu-item" type="button" role="menuitem" @click="followFromMenu(false)">
+              Open related table
+            </button>
+            <button class="overflow-menu-item" type="button" role="menuitem" @click="followFromMenu(true)">
+              Open to the side
+            </button>
+          </template>
+        </template>
+        <template v-else>
+          <button class="overflow-menu-item" type="button" role="menuitem" :disabled="!menuColumn" @click="filterOnColumn">
+            Filter on {{ menuColumn?.name ?? "column" }}…
+          </button>
+          <div class="overflow-menu-divider" role="separator" />
+          <button class="overflow-menu-item" type="button" role="menuitem" @click="sortFromMenu('asc')">
+            Sort ascending
+          </button>
+          <button class="overflow-menu-item" type="button" role="menuitem" @click="sortFromMenu('desc')">
+            Sort descending
+          </button>
+          <button class="overflow-menu-item" type="button" role="menuitem" :disabled="!view.sort" @click="sortFromMenu(null)">
+            Clear sort
+          </button>
+        </template>
+      </div>
+    </Teleport>
+    <FilterPopover
+      v-if="summaryAnchor && summaryVisible && active"
+      :preview="filterPreview"
+      :count="filterCount"
+      :anchor="summaryAnchor"
+      :hint="filterError || 'Click to edit filters (⌘F)'"
+    />
+    <Modal v-if="customRefresh" title="Auto refresh" @close="customRefresh = false">
+      <form @submit.prevent="applyCustomRefresh">
+        <label class="modal-label">
+          <span class="muted tiny">Refresh every (seconds)</span>
+          <input
+            v-model.number="customRefreshSeconds"
+            type="number"
+            min="1"
+            max="3600"
+            step="1"
+            required
+          />
+        </label>
+      </form>
+      <template #actions>
+        <button class="ghost" type="button" @click="customRefresh = false">Cancel</button>
+        <button class="primary" type="button" @click="applyCustomRefresh">Set</button>
+      </template>
+    </Modal>
+    <Modal v-if="sqlPreview" title="SQL for this view" wide @close="sqlPreview = null">
+      <p v-if="sqlPreview.loading" class="action-progress"><span class="spinner" aria-hidden="true" /> Building SQL…</p>
+      <p v-else-if="sqlPreview.error" class="settings-error">{{ sqlPreview.error }}</p>
+      <pre v-else class="filter-sql-preview">{{ sqlPreview.sql }}</pre>
+      <p class="muted tiny">
+        Values are written out for reading. Recon checks every column, operator, and value before it runs a filter.
+      </p>
+      <template #actions>
+        <button class="ghost" type="button" @click="sqlPreview = null">Close</button>
+        <button class="ghost" type="button" :disabled="!sqlPreview.sql" @click="copySql">Copy</button>
+        <button class="primary" type="button" :disabled="!sqlPreview.sql" @click="openSqlInTab">Open in SQL tab</button>
+      </template>
+    </Modal>
   </div>
 </template>

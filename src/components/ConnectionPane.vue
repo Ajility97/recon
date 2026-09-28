@@ -7,10 +7,22 @@ import * as api from "../api";
 import { SIDEBAR_MAX, SIDEBAR_MIN, useApp } from "../composables/useApp";
 import { useConnectionForm } from "../composables/useConnectionForm";
 import { registerInnerTabCloser, setLiveTitle, useTabs } from "../composables/useTabs";
+import type { FilterPreviewGroup } from "../filters/compile";
+import {
+  cloneNode,
+  emptyGroup,
+  hasConditions,
+  linkFilter,
+  newId,
+  clampTabPageSize,
+  sanitizeAutoRefresh,
+  sanitizeFilter,
+  type TableViewState,
+} from "../filters/model";
 import {
   driverLabel,
   type BackupInfo,
-  type CellEdit,
+  type SaveRequest,
   type SavedQuery,
   type SessionInfo,
   type TableInfo,
@@ -21,26 +33,56 @@ import ConnectionViewTabs, { type ConnectionViewTab } from "./ConnectionViewTabs
 import DatabaseSwitcher from "./DatabaseSwitcher.vue";
 import DriverIcon from "./DriverIcon.vue";
 import ExportDialog from "./ExportDialog.vue";
+import FilterPopover from "./FilterPopover.vue";
 import ImportDialog from "./ImportDialog.vue";
 import Modal from "./Modal.vue";
 import QueryEditor from "./QueryEditor.vue";
 import QueryHistory from "./QueryHistory.vue";
 import RestoreDialog from "./RestoreDialog.vue";
 import SavedQueries from "./SavedQueries.vue";
+import SplitWorkspace from "./SplitWorkspace.vue";
+import TablePaneFrame, { type PaneTabInfo } from "./TablePaneFrame.vue";
 import TableView from "./TableView.vue";
+import {
+  activateTab,
+  addTabToPane,
+  canSplit,
+  defaultSizesFor,
+  dropEdge,
+  edgeToDirection,
+  emptyPane,
+  emptyWorkspace,
+  findPane,
+  focusedActiveTabId,
+  focusPane,
+  MAX_PANES,
+  mergeAllPanes,
+  moveTab,
+  nextSplitDirection,
+  nodeAtPath,
+  paneForTab,
+  removePane,
+  removeTabFromWorkspace,
+  restoreWorkspace,
+  splitFocused,
+  updateSplitSizes,
+  type DropEdge,
+  type SplitDirection,
+  type TableWorkspace,
+} from "../workspace/split";
 
-type PaneTab =
-  | {
-      id: string;
-      kind: "table";
-      namespace: string;
-      table: string;
-      tableKind: "table" | "view";
-      filter?: CellEdit[];
-    }
-  | { id: string; kind: "query"; key: string; title: string; savedId?: string };
+/** Table tab ids are opaque, so several tabs can show the same table with different filters. */
+type TableTab = { id: string; kind: "table" } & TableViewState;
+
+type PaneTab = TableTab | { id: string; kind: "query"; key: string; title: string; savedId?: string };
 
 type QueryTab = Extract<PaneTab, { kind: "query" }>;
+
+interface FilterIndicator {
+  count: number;
+  summary: string;
+  preview: FilterPreviewGroup | null;
+}
 
 const SAVED_TAB_ID = "saved-queries";
 
@@ -82,10 +124,23 @@ const filter = ref("");
 const schema = shallowRef<SQLNamespace>({});
 const tabs = ref<PaneTab[]>([]);
 const view = ref<ConnectionViewTab>("tables");
-const activeTableTabId = ref("");
+const workspace = ref<TableWorkspace>(emptyWorkspace());
 const activeQueryTabId = ref("");
 const tabsRestored = ref(false);
+const splitHost = ref<HTMLElement | null>(null);
+const flashPaneId = ref("");
+let flashPaneTimer = 0;
+const draggingTabId = ref("");
+const dropTarget = ref<{ paneId: string; afterId?: string; edge?: DropEdge } | null>(null);
 const dirtyTabs = ref(new Map<string, number>());
+const filteredTabs = ref(new Map<string, FilterIndicator>());
+const filterPopover = ref<{ tabId: string; anchor: DOMRect } | null>(null);
+let filterPopoverTimer = 0;
+const popoverFilters = computed(() =>
+  filterPopover.value ? (filteredTabs.value.get(filterPopover.value.tabId) ?? null) : null,
+);
+const tabActivity = new Map<string, number>();
+let tableTabsSaveTimer = 0;
 const saving = ref(false);
 const nameDialog = ref<{ mode: "create" } | { mode: "rename"; from: string } | null>(null);
 const nameValue = ref("");
@@ -93,6 +148,17 @@ const nameError = ref("");
 const nameBusy = ref(false);
 const nameInput = ref<HTMLInputElement | null>(null);
 const sidebarEl = ref<HTMLElement | null>(null);
+const subtabBar = ref<HTMLElement | null>(null);
+
+const activeTableTabId = computed({
+  get: () => focusedActiveTabId(workspace.value),
+  set: (id: string) => {
+    if (!id) {
+      return;
+    }
+    workspace.value = activateTab(workspace.value, id);
+  },
+});
 const selectedTables = ref(new Set<string>());
 const tableMenu = ref<{ x: number; y: number; tables: string[] } | null>(null);
 const tableMenuEl = ref<HTMLElement | null>(null);
@@ -154,6 +220,7 @@ watch(
 );
 
 const queryTabsKey = computed(() => `recon.queryTabs.${props.sessionId}`);
+const tableTabsKey = computed(() => `recon.tableTabs.${props.sessionId}`);
 
 const connectionSaved = computed(() =>
   savedQueries.value.filter((query) => query.connectionId === props.connectionId),
@@ -166,7 +233,47 @@ const menuTab = computed(() => {
   const tab = tabs.value.find((item) => item.id === tabMenu.value?.tabId);
   return tab?.kind === "query" ? tab : null;
 });
+const menuTableTab = computed(() => {
+  const tab = tabs.value.find((item) => item.id === tabMenu.value?.tabId);
+  return tab?.kind === "table" ? tab : null;
+});
 
+function tableKey(tableNamespace: string, table: string) {
+  return `${tableNamespace}\u0000${table}`;
+}
+
+const activeTableKey = computed(() => {
+  const tab = tabs.value.find((item) => item.id === activeTableTabId.value);
+  return tab?.kind === "table" ? tableKey(tab.namespace, tab.table) : "";
+});
+const dirtyTableKeys = computed(
+  () =>
+    new Set(
+      tabs.value.flatMap((tab) =>
+        tab.kind === "table" && dirtyTabs.value.has(tab.id) ? [tableKey(tab.namespace, tab.table)] : [],
+      ),
+    ),
+);
+
+/** Tabs on the same table without a custom name are numbered in tab order: orders, orders · 2. */
+const tableTitleSuffix = computed(() => {
+  const seen = new Map<string, number>();
+  const suffix = new Map<string, string>();
+  for (const tab of tabs.value) {
+    if (tab.kind !== "table" || tab.title) {
+      continue;
+    }
+    const key = tableKey(tab.namespace, tab.table);
+    const count = (seen.get(key) ?? 0) + 1;
+    seen.set(key, count);
+    if (count > 1) {
+      suffix.set(tab.id, ` · ${count}`);
+    }
+  }
+  return suffix;
+});
+
+const queryTabs = computed(() => tabs.value.filter((tab): tab is QueryTab => tab.kind === "query"));
 const viewTabs = computed(() => {
   if (view.value === "history") {
     return [];
@@ -266,6 +373,105 @@ function restoreQueryTabs() {
   saveQueryTabs();
 }
 
+function saveTableTabs() {
+  window.clearTimeout(tableTabsSaveTimer);
+  tableTabsSaveTimer = 0;
+  if (!tabsRestored.value) {
+    return;
+  }
+  const saved = {
+    active: activeTableTabId.value,
+    focusedPaneId: workspace.value.focusedPaneId,
+    twoPaneAxis: workspace.value.twoPaneAxis,
+    layout: workspace.value.layout,
+    panes: workspace.value.panes,
+    tabs: tabs.value.flatMap((tab) =>
+      tab.kind === "table"
+        ? [
+            {
+              id: tab.id,
+              namespace: tab.namespace,
+              table: tab.table,
+              tableKind: tab.tableKind,
+              filter: tab.filter,
+              sort: tab.sort,
+              panelOpen: tab.panelOpen,
+              origin: tab.origin,
+              title: tab.title,
+              pageSize: tab.pageSize != null ? clampTabPageSize(tab.pageSize) : undefined,
+              autoRefresh: tab.autoRefresh,
+            },
+          ]
+        : [],
+    ),
+  };
+  try {
+    localStorage.setItem(tableTabsKey.value, JSON.stringify(saved));
+  } catch {
+    // Storage is full; the tabs still work for this session.
+  }
+}
+
+function scheduleSaveTableTabs() {
+  window.clearTimeout(tableTabsSaveTimer);
+  tableTabsSaveTimer = window.setTimeout(saveTableTabs, 300);
+}
+
+function restoredTableTab(value: unknown): TableTab | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const item = value as Record<string, unknown>;
+  if (typeof item.id !== "string" || typeof item.namespace !== "string" || typeof item.table !== "string") {
+    return null;
+  }
+  const sort = item.sort as Record<string, unknown> | null | undefined;
+  return {
+    id: item.id,
+    kind: "table",
+    namespace: item.namespace,
+    table: item.table,
+    tableKind: item.tableKind === "view" ? "view" : "table",
+    filter: sanitizeFilter(item.filter),
+    sort:
+      sort && typeof sort.column === "string" && (sort.dir === "asc" || sort.dir === "desc")
+        ? { column: sort.column, dir: sort.dir }
+        : null,
+    panelOpen: item.panelOpen === true,
+    origin: item.origin === "link" ? "link" : "user",
+    title: typeof item.title === "string" && item.title ? item.title : undefined,
+    pageSize:
+      typeof item.pageSize === "number" && Number.isFinite(item.pageSize)
+        ? clampTabPageSize(item.pageSize)
+        : undefined,
+    autoRefresh: sanitizeAutoRefresh(item.autoRefresh),
+  };
+}
+
+function restoreTableTabs() {
+  let saved: Record<string, unknown> = {};
+  try {
+    saved = JSON.parse(localStorage.getItem(tableTabsKey.value) ?? "{}") ?? {};
+  } catch {
+    saved = {};
+  }
+  const restored = (Array.isArray(saved.tabs) ? saved.tabs : [])
+    .map(restoredTableTab)
+    .filter((tab): tab is TableTab => tab !== null);
+  tabs.value = [...tabs.value, ...restored];
+  const active = restored.find((tab) => tab.id === saved.active) ?? restored[0];
+  workspace.value = restoreWorkspace(
+    {
+      layout: saved.layout,
+      panes: saved.panes,
+      focusedPaneId: saved.focusedPaneId,
+      twoPaneAxis: saved.twoPaneAxis,
+    },
+    restored.map((tab) => tab.id),
+    active?.id ?? "",
+  );
+}
+
 function openQueryTab(initialSql?: string) {
   const key = nextQueryKey();
   const tab: PaneTab = { id: `query:${key}`, kind: "query", key, title: queryTitle() };
@@ -273,6 +479,7 @@ function openQueryTab(initialSql?: string) {
   activeQueryTabId.value = tab.id;
   view.value = "sql";
   saveQueryTabs();
+  flashTab(tab.id);
   if (initialSql) {
     void nextTick(() => editors.get(tab.id)?.insertText(initialSql));
   }
@@ -299,6 +506,7 @@ function openSavedQuery(query: SavedQuery, run = false) {
     tab = { id: `query:${key}`, kind: "query", key, title: query.name, savedId: query.id };
     tabs.value = [...tabs.value, tab];
     saveQueryTabs();
+    flashTab(tab.id);
   }
   const id = tab.id;
   activeQueryTabId.value = id;
@@ -346,7 +554,7 @@ watch(connectionSaved, (list) => {
   }
 });
 
-function startTabRename(tab: QueryTab) {
+function startTabRename(tab: PaneTab) {
   closeMenus();
   selectTab(tab);
   renameValue.value = tabTitle(tab);
@@ -363,6 +571,16 @@ function cancelTabRename() {
 }
 
 async function commitTabRename() {
+  const tableTab = tabs.value.find((item): item is TableTab => item.id === renamingTabId.value && item.kind === "table");
+  if (tableTab) {
+    renamingTabId.value = "";
+    const name = renameValue.value.trim();
+    const title = name && name !== baseTableTitle(tableTab) ? name : undefined;
+    if (title !== tableTab.title) {
+      updateView(tableTab.id, { title });
+    }
+    return;
+  }
   const tab = tabs.value.find((item): item is QueryTab => item.id === renamingTabId.value && item.kind === "query");
   renamingTabId.value = "";
   const name = renameValue.value.trim();
@@ -451,16 +669,241 @@ function showInSaved(tab: QueryTab) {
   }
 }
 
-function openTable(table: TableInfo) {
-  const id = `table:${namespace.value}.${table.name}`;
-  if (!tabs.value.some((tab) => tab.id === id)) {
-    tabs.value = [
-      ...tabs.value,
-      { id, kind: "table", namespace: namespace.value, table: table.name, tableKind: table.kind },
-    ];
-  }
-  activeTableTabId.value = id;
+function newTableTab(
+  tableNamespace: string,
+  table: string,
+  tableKind: "table" | "view",
+  patch: Partial<TableViewState> = {},
+): TableTab {
+  return {
+    id: `table:${newId("")}`,
+    kind: "table",
+    namespace: tableNamespace,
+    table,
+    tableKind,
+    filter: emptyGroup(),
+    sort: null,
+    panelOpen: false,
+    origin: "user",
+    ...patch,
+  };
 }
+
+function tabsForTable(tableNamespace: string, table: string) {
+  return tabs.value.filter(
+    (tab): tab is TableTab => tab.kind === "table" && tab.namespace === tableNamespace && tab.table === table,
+  );
+}
+
+function mostRecentTab(list: TableTab[]) {
+  let best: TableTab | undefined;
+  for (const tab of list) {
+    if (!best || (tabActivity.get(tab.id) ?? 0) >= (tabActivity.get(best.id) ?? 0)) {
+      best = tab;
+    }
+  }
+  return best;
+}
+
+/** Adds a table tab right after `afterId`, or at the end, and focuses it. */
+function insertTableTab(tab: TableTab, afterId?: string, paneId?: string) {
+  const next = [...tabs.value];
+  const index = afterId ? next.findIndex((item) => item.id === afterId) : -1;
+  next.splice(index >= 0 ? index + 1 : next.length, 0, tab);
+  tabs.value = next;
+  const target = paneId && findPane(workspace.value, paneId) ? paneId : workspace.value.focusedPaneId;
+  const pane = findPane(workspace.value, target);
+  const afterInPane = afterId && pane?.tabIds.includes(afterId) ? afterId : undefined;
+  workspace.value = addTabToPane(workspace.value, target, tab.id, afterInPane);
+  scheduleSaveTableTabs();
+  flashTab(tab.id);
+}
+
+/** Turns a vertical mouse wheel into horizontal scrolling while the pointer is over the tab strip. */
+function onSubtabWheel(event: WheelEvent) {
+  const strip = event.currentTarget as HTMLElement;
+  if (strip.scrollWidth <= strip.clientWidth || Math.abs(event.deltaY) <= Math.abs(event.deltaX)) {
+    return;
+  }
+  event.preventDefault();
+  const scale = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16 : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? strip.clientWidth : 1;
+  strip.scrollLeft += event.deltaY * scale;
+}
+
+/** Matches the `new-item-flash` animation in styles.css. */
+const TAB_FLASH_MS = 1800;
+const flashTabId = ref("");
+let flashTabTimer = 0;
+
+/** Scrolls a newly opened tab into view in the tab strip and briefly highlights it. */
+function flashTab(id: string) {
+  flashTabId.value = id;
+  window.clearTimeout(flashTabTimer);
+  flashTabTimer = window.setTimeout(() => {
+    flashTabId.value = "";
+  }, TAB_FLASH_MS);
+  void nextTick(() => {
+    const root = view.value === "sql" ? subtabBar.value : splitHost.value;
+    const tab = root?.querySelector<HTMLElement>(`[data-tab-id="${CSS.escape(id)}"]`);
+    const strip = tab?.closest(".subtab-bar");
+    if (!strip || !tab) {
+      return;
+    }
+    const box = strip.getBoundingClientRect();
+    const rect = tab.getBoundingClientRect();
+    if (rect.left < box.left) {
+      strip.scrollLeft -= box.left - rect.left + 8;
+    } else if (rect.right > box.right) {
+      strip.scrollLeft += rect.right - box.right + 8;
+    }
+  });
+}
+
+function flashPane(id: string) {
+  flashPaneId.value = id;
+  window.clearTimeout(flashPaneTimer);
+  flashPaneTimer = window.setTimeout(() => {
+    flashPaneId.value = "";
+  }, TAB_FLASH_MS);
+}
+
+/**
+ * Focuses the most recently used tab on `table`, unless `newTab` asks for
+ * another view of it. A new tab goes after the table's other tabs, or after
+ * every tab when `atEnd` is set. Returns whether a tab was created.
+ */
+function openTable(table: TableInfo, newTab = false, atEnd = false) {
+  const existing = tabsForTable(namespace.value, table.name);
+  if (!newTab) {
+    const focused = findPane(workspace.value, workspace.value.focusedPaneId);
+    const inFocused = existing.filter((tab) => focused?.tabIds.includes(tab.id));
+    const recentFocused = mostRecentTab(inFocused);
+    if (recentFocused) {
+      workspace.value = activateTab(workspace.value, recentFocused.id);
+      scheduleSaveTableTabs();
+      return false;
+    }
+    const recent = mostRecentTab(existing);
+    if (recent) {
+      workspace.value = activateTab(workspace.value, recent.id);
+      scheduleSaveTableTabs();
+      return false;
+    }
+  }
+  insertTableTab(
+    newTableTab(namespace.value, table.name, table.kind),
+    atEnd ? undefined : existing[existing.length - 1]?.id,
+  );
+  return true;
+}
+
+/** The table whose tab the latest single click created, so the double-click that follows doesn't add another. */
+let clickCreatedTab = "";
+
+function onTableDblclick(event: MouseEvent, table: TableInfo) {
+  if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+    return;
+  }
+  if (clickCreatedTab === table.name) {
+    clickCreatedTab = "";
+    return;
+  }
+  openTable(table, true, true);
+}
+
+function updateView(id: string, patch: Partial<TableViewState>) {
+  tabs.value = tabs.value.map((tab) => (tab.id === id && tab.kind === "table" ? { ...tab, ...patch } : tab));
+  scheduleSaveTableTabs();
+}
+
+function setFilterIndicator(id: string, indicator: FilterIndicator) {
+  const current = filteredTabs.value.get(id);
+  if (
+    current?.count === indicator.count &&
+    current.summary === indicator.summary &&
+    JSON.stringify(current.preview) === JSON.stringify(indicator.preview)
+  ) {
+    return;
+  }
+  const next = new Map(filteredTabs.value);
+  if (indicator.count) {
+    next.set(id, indicator);
+  } else if (current) {
+    next.delete(id);
+  } else {
+    return;
+  }
+  filteredTabs.value = next;
+}
+
+function resetTableTitle(tab: TableTab) {
+  closeMenus();
+  updateView(tab.id, { title: undefined });
+}
+
+function closeTableTab(tab: TableTab) {
+  closeMenus();
+  closeTab(tab.id);
+}
+
+type CloseScope = "others" | "left" | "right";
+
+/** Table tabs beside `tab` in this pane's tab-bar order. */
+function tableTabsBeside(tab: TableTab, scope: CloseScope) {
+  const pane = paneForTab(workspace.value, tab.id);
+  const list = (pane?.tabIds ?? []).flatMap((id) => {
+    const item = tabs.value.find((entry): entry is TableTab => entry.id === id && entry.kind === "table");
+    return item ? [item] : [];
+  });
+  const index = list.findIndex((item) => item.id === tab.id);
+  if (scope === "left") {
+    return list.slice(0, index);
+  }
+  if (scope === "right") {
+    return list.slice(index + 1);
+  }
+  return list.filter((item) => item.id !== tab.id);
+}
+
+/** Closes several table tabs, asking once if any of them have unsaved changes. */
+async function closeTableTabs(tab: TableTab, scope: CloseScope) {
+  closeMenus();
+  const closing = tableTabsBeside(tab, scope);
+  if (!closing.length) {
+    return;
+  }
+  const dirty = closing.filter((item) => dirtyTabs.value.has(item.id));
+  if (dirty.length) {
+    const names = dirty.slice(0, 3).map((item) => `“${tabTitle(item)}”`).join(", ");
+    const more = dirty.length > 3 ? ` and ${dirty.length - 3} more` : "";
+    const ok = await confirm(`Discard unsaved changes to ${names}${more}?`, {
+      title: "Unsaved changes",
+      kind: "warning",
+      okLabel: "Discard",
+      cancelLabel: "Cancel",
+    });
+    if (!ok) {
+      return;
+    }
+  }
+  for (const item of closing) {
+    setTabChanges(item.id, 0);
+    removeTab(item.id);
+  }
+  activeTableTabId.value = tab.id;
+}
+
+function duplicateTableTab(tab: TableTab) {
+  closeMenus();
+  insertTableTab({ ...tab, id: `table:${newId("")}`, filter: cloneNode(tab.filter), origin: "user", title: undefined }, tab.id);
+}
+
+watch(activeTableTabId, (id) => {
+  if (id) {
+    tabActivity.set(id, Date.now());
+  }
+  scheduleSaveTableTabs();
+});
 
 function activeTableName() {
   const tab = tabs.value.find((item) => item.id === activeTableTabId.value);
@@ -470,9 +913,16 @@ function activeTableName() {
 /**
  * Finder-style selection: a plain click opens the table and selects only it,
  * Cmd+click toggles a table without opening it, and Shift+click selects the
- * visible range from the last clicked table.
+ * visible range from the last clicked table. Option+click and double-click
+ * open another tab on the table.
  */
 function onTableClick(event: MouseEvent, table: TableInfo) {
+  if (event.altKey) {
+    selectedTables.value = new Set([table.name]);
+    selectionAnchor = table.name;
+    openTable(table, true);
+    return;
+  }
   if (event.metaKey || event.ctrlKey) {
     const next = new Set(selectedTables.value);
     const active = activeTableName();
@@ -497,7 +947,10 @@ function onTableClick(event: MouseEvent, table: TableInfo) {
   }
   selectedTables.value = new Set([table.name]);
   selectionAnchor = table.name;
-  openTable(table);
+  const created = openTable(table);
+  if (event.detail <= 1) {
+    clickCreatedTab = created ? table.name : "";
+  }
 }
 
 function onMenuKeydown(event: KeyboardEvent) {
@@ -560,9 +1013,6 @@ function openTableMenu(event: MouseEvent, table: TableInfo) {
 }
 
 function openTabMenu(event: MouseEvent, tab: PaneTab) {
-  if (tab.kind !== "query") {
-    return;
-  }
   event.preventDefault();
   closeMenus();
   tabMenu.value = { x: event.clientX, y: event.clientY, tabId: tab.id };
@@ -570,15 +1020,19 @@ function openTabMenu(event: MouseEvent, tab: PaneTab) {
   fitMenu(tabMenu, tabMenuEl);
 }
 
-function runTableAction(action: "open" | "query" | "copy" | "export") {
+function runTableAction(action: "open" | "openNew" | "openSide" | "query" | "copy" | "export") {
   const chosen = tableMenu.value?.tables ?? [];
-  closeMenus();
   const table = tables.value.find((item) => item.name === chosen[0]);
+  if (action === "openSide" && table) {
+    openTableToTheSide(table);
+    return;
+  }
+  closeMenus();
   if (!table) {
     return;
   }
-  if (action === "open") {
-    openTable(table);
+  if (action === "open" || action === "openNew") {
+    openTable(table, action === "openNew");
   } else if (action === "query") {
     queryTable(table);
   } else if (action === "copy") {
@@ -617,9 +1071,15 @@ async function startRestore() {
   }
 }
 
+function refreshVisibleTables() {
+  for (const pane of workspace.value.panes) {
+    tableViews.get(pane.activeTabId)?.refresh();
+  }
+}
+
 function onImported() {
   void refreshAll();
-  void tableViews.get(activeTableTabId.value)?.refresh();
+  refreshVisibleTables();
 }
 
 watch(namespace, () => {
@@ -635,40 +1095,411 @@ watch(tables, (list) => {
   }
 });
 
-function setTableFilter(id: string, filter: CellEdit[] | undefined) {
-  tabs.value = tabs.value.map((tab) => (tab.id === id && tab.kind === "table" ? { ...tab, filter } : tab));
+/**
+ * Reuses a tab on the target table only when that tab has no filters or its
+ * filter also came from an arrow, so filters the user built are never replaced.
+ */
+function onTableFollow(link: TableLink, options?: { side?: boolean }) {
+  followLink(link, Boolean(options?.side));
 }
 
-function followLink(link: TableLink) {
-  const id = `table:${link.namespace}.${link.table}`;
-  if (tabs.value.some((tab) => tab.id === id)) {
-    setTableFilter(id, link.filter);
-  } else {
-    const known = link.namespace === namespace.value
-      ? tables.value.find((table) => table.name === link.table)
-      : undefined;
-    tabs.value = [
-      ...tabs.value,
-      {
-        id,
-        kind: "table",
-        namespace: link.namespace,
-        table: link.table,
-        tableKind: known?.kind ?? "table",
-        filter: link.filter,
-      },
-    ];
-  }
+function followLink(link: TableLink, side = false) {
+  const filter = linkFilter(link.filter);
   view.value = "tables";
-  activeTableTabId.value = id;
+  if (side) {
+    followLinkToSide(link, filter);
+    return;
+  }
+  const focused = findPane(workspace.value, workspace.value.focusedPaneId);
+  const reusable = mostRecentTab(
+    tabsForTable(link.namespace, link.table).filter(
+      (tab) =>
+        Boolean(focused?.tabIds.includes(tab.id)) && (tab.origin === "link" || !hasConditions(tab.filter)),
+    ),
+  );
+  if (reusable) {
+    updateView(reusable.id, { filter, origin: "link" });
+    workspace.value = activateTab(workspace.value, reusable.id);
+    scheduleSaveTableTabs();
+    return;
+  }
+  const known =
+    link.namespace === namespace.value ? tables.value.find((table) => table.name === link.table) : undefined;
+  insertTableTab(
+    newTableTab(link.namespace, link.table, known?.kind ?? "table", { filter, origin: "link" }),
+    focused?.activeTabId,
+  );
+}
+
+function followLinkToSide(link: TableLink, filter: ReturnType<typeof linkFilter>) {
+  if (!ensureCanSplit(nextSplitDirection(workspace.value) ?? "right")) {
+    followLink(link, false);
+    return;
+  }
+  const known =
+    link.namespace === namespace.value ? tables.value.find((table) => table.name === link.table) : undefined;
+  const tab = newTableTab(link.namespace, link.table, known?.kind ?? "table", { filter, origin: "link" });
+  openTabInNewPane(tab, nextSplitDirection(workspace.value) ?? "right");
 }
 
 function selectTab(tab: PaneTab) {
   if (tab.kind === "query") {
     activeQueryTabId.value = tab.id;
   } else {
-    activeTableTabId.value = tab.id;
+    workspace.value = activateTab(workspace.value, tab.id);
+    scheduleSaveTableTabs();
   }
+}
+
+function splitToast(reason: "max" | "size") {
+  showToast(
+    reason === "max"
+      ? "The workspace can show 6 tables at once. Close a pane to split again."
+      : "This window is too small to add another table pane.",
+  );
+}
+
+function ensureCanSplit(direction: SplitDirection): boolean {
+  const count = workspace.value.panes.length;
+  if (count >= MAX_PANES) {
+    splitToast("max");
+    return false;
+  }
+  const width = splitHost.value?.clientWidth ?? 0;
+  const height = splitHost.value?.clientHeight ?? 0;
+  const check = canSplit(width, height, count, direction);
+  if (!check.ok) {
+    splitToast(check.reason);
+    return false;
+  }
+  return true;
+}
+
+function openTabInNewPane(tab: TableTab, direction: SplitDirection) {
+  const focused = findPane(workspace.value, workspace.value.focusedPaneId);
+  if (!focused?.tabIds.length) {
+    insertTableTab(tab);
+    return;
+  }
+  tabs.value = [...tabs.value, tab];
+  const pane = emptyPane([tab.id], tab.id);
+  const result = splitFocused(workspace.value, pane, direction);
+  if ("error" in result) {
+    workspace.value = addTabToPane(workspace.value, workspace.value.focusedPaneId, tab.id);
+  } else {
+    workspace.value = result;
+    flashPane(pane.id);
+  }
+  scheduleSaveTableTabs();
+  flashTab(tab.id);
+}
+
+function openTableToTheSide(table: TableInfo) {
+  closeMenus();
+  const existing = tabsForTable(namespace.value, table.name);
+  const focusedId = workspace.value.focusedPaneId;
+  const elsewhere = existing.filter((tab) => paneForTab(workspace.value, tab.id)?.id !== focusedId);
+  const recentElse = mostRecentTab(elsewhere);
+  if (recentElse) {
+    workspace.value = activateTab(workspace.value, recentElse.id);
+    scheduleSaveTableTabs();
+    flashTab(recentElse.id);
+    return;
+  }
+  const direction = nextSplitDirection(workspace.value) ?? "right";
+  if (!ensureCanSplit(direction)) {
+    return;
+  }
+  openTabInNewPane(newTableTab(namespace.value, table.name, table.kind), direction);
+}
+
+function splitTableTab(tab: TableTab, direction: SplitDirection) {
+  closeMenus();
+  workspace.value = activateTab(workspace.value, tab.id);
+  if (!ensureCanSplit(direction)) {
+    return;
+  }
+  const copy: TableTab = {
+    ...tab,
+    id: `table:${newId("")}`,
+    filter: cloneNode(tab.filter),
+    origin: "user",
+    title: undefined,
+    panelOpen: false,
+  };
+  openTabInNewPane(copy, direction);
+}
+
+function closeWorkspacePane(paneId: string) {
+  closeMenus();
+  if (!paneId || workspace.value.panes.length <= 1) {
+    return;
+  }
+  workspace.value = removePane(workspace.value, paneId, true);
+  scheduleSaveTableTabs();
+}
+
+function mergeWorkspacePanes() {
+  closeMenus();
+  if (workspace.value.panes.length <= 1) {
+    return;
+  }
+  workspace.value = mergeAllPanes(workspace.value, activeTableTabId.value);
+  scheduleSaveTableTabs();
+}
+
+function moveMenuTabToPane(paneId: string) {
+  const tab = menuTableTab.value;
+  closeMenus();
+  if (!tab) {
+    return;
+  }
+  workspace.value = moveTab(workspace.value, tab.id, paneId);
+  scheduleSaveTableTabs();
+  flashTab(tab.id);
+}
+
+function onFocusPane(paneId: string) {
+  if (workspace.value.focusedPaneId === paneId) {
+    return;
+  }
+  workspace.value = focusPane(workspace.value, paneId);
+  scheduleSaveTableTabs();
+}
+
+function onSplitResize(path: number[], sizes: [number, number]) {
+  workspace.value = { ...workspace.value, layout: updateSplitSizes(workspace.value.layout, path, sizes) };
+  scheduleSaveTableTabs();
+}
+
+function onSplitReset(path: number[]) {
+  const node = nodeAtPath(workspace.value.layout, path);
+  const sizes = node ? defaultSizesFor(node) : null;
+  if (!sizes) {
+    return;
+  }
+  workspace.value = { ...workspace.value, layout: updateSplitSizes(workspace.value.layout, path, sizes) };
+  scheduleSaveTableTabs();
+}
+
+function tabInfo(tab: TableTab, preview = false): PaneTabInfo {
+  const filtered = filteredTabs.value.get(tab.id);
+  return {
+    id: tab.id,
+    title: tabTitle(tab),
+    tooltip: preview ? `${tabTitle(tab)} · drop to move here` : filterPopover.value?.tabId === tab.id ? "" : tabTooltip(tab),
+    dirty: dirtyTabs.value.has(tab.id),
+    filtered: filtered
+      ? { count: filtered.count, summary: filtered.summary }
+      : hasConditions(tab.filter)
+        ? { count: 1, summary: "" }
+        : undefined,
+    flash: !preview && flashTabId.value === tab.id,
+    preview,
+  };
+}
+
+function paneTabInfos(paneId: string): PaneTabInfo[] {
+  const pane = findPane(workspace.value, paneId);
+  const infos = (pane?.tabIds ?? []).flatMap((id) => {
+    const tab = tabs.value.find((item): item is TableTab => item.id === id && item.kind === "table");
+    return tab ? [tabInfo(tab)] : [];
+  });
+  const preview = dropPreviewTab.value;
+  if (preview && dropHoverPaneId.value === paneId && !infos.some((item) => item.id === preview.id)) {
+    infos.push(tabInfo(preview, true));
+  }
+  return infos;
+}
+
+const dropHoverPaneId = computed(() => {
+  const target = dropTarget.value;
+  const dragging = draggingTabId.value;
+  if (!target || !dragging || target.edge) {
+    return "";
+  }
+  const source = paneForTab(workspace.value, dragging);
+  return source && source.id !== target.paneId ? target.paneId : "";
+});
+
+const dropPreviewTab = computed(() => {
+  const id = draggingTabId.value;
+  if (!id || !dropHoverPaneId.value) {
+    return null;
+  }
+  const tab = tabs.value.find((item): item is TableTab => item.id === id && item.kind === "table");
+  return tab ?? null;
+});
+
+const dragTableTab = computed(() => {
+  const id = draggingTabId.value;
+  if (!id) {
+    return null;
+  }
+  return tabs.value.find((item): item is TableTab => item.id === id && item.kind === "table") ?? null;
+});
+
+function tableTabsInPane(paneId: string): TableTab[] {
+  const pane = findPane(workspace.value, paneId);
+  return (pane?.tabIds ?? []).flatMap((id) => {
+    const tab = tabs.value.find((item): item is TableTab => item.id === id && item.kind === "table");
+    return tab ? [tab] : [];
+  });
+}
+
+function otherPanes(exceptPaneId?: string) {
+  const skip = exceptPaneId ?? (menuTableTab.value ? paneForTab(workspace.value, menuTableTab.value.id)?.id : "");
+  return workspace.value.panes.filter((pane) => pane.id !== skip).map((pane) => {
+    const tab = tabs.value.find((item) => item.id === pane.activeTabId);
+    return { id: pane.id, label: tab ? tabTitle(tab) : "Pane" };
+  });
+}
+
+function paneFromPoint(x: number, y: number): { paneId: string; edge?: DropEdge } | null {
+  const node = document.elementFromPoint(x, y);
+  if (!(node instanceof Element)) {
+    return null;
+  }
+  const preview = node.closest<HTMLElement>("[data-drop-edge]");
+  if (preview?.dataset.paneId && preview.dataset.dropEdge) {
+    return { paneId: preview.dataset.paneId, edge: preview.dataset.dropEdge as DropEdge };
+  }
+  const frame = node.closest<HTMLElement>("[data-pane-id]");
+  if (frame?.dataset.paneId) {
+    return { paneId: frame.dataset.paneId };
+  }
+  const sash = node.closest(".split-sash");
+  if (!(sash instanceof HTMLElement)) {
+    return null;
+  }
+  const prev = sash.previousElementSibling?.querySelector<HTMLElement>("[data-pane-id]");
+  const next = sash.nextElementSibling?.querySelector<HTMLElement>("[data-pane-id]");
+  const box = sash.getBoundingClientRect();
+  if (sash.classList.contains("axis-x")) {
+    return x < box.left + box.width / 2
+      ? prev?.dataset.paneId
+        ? { paneId: prev.dataset.paneId, edge: "right" }
+        : null
+      : next?.dataset.paneId
+        ? { paneId: next.dataset.paneId, edge: "left" }
+        : null;
+  }
+  return y < box.top + box.height / 2
+    ? prev?.dataset.paneId
+      ? { paneId: prev.dataset.paneId, edge: "down" }
+      : null
+    : next?.dataset.paneId
+      ? { paneId: next.dataset.paneId, edge: "up" }
+      : null;
+}
+
+function onTabPointerDown(event: PointerEvent, tabId: string) {
+  if (event.button !== 0 || renamingTabId.value) {
+    return;
+  }
+  const startX = event.clientX;
+  const startY = event.clientY;
+  let started = false;
+
+  const onMove = (move: PointerEvent) => {
+    if (!started) {
+      if (Math.hypot(move.clientX - startX, move.clientY - startY) < 6) {
+        return;
+      }
+      started = true;
+      draggingTabId.value = tabId;
+      document.body.classList.add("dragging-tab");
+    }
+    const hit = paneFromPoint(move.clientX, move.clientY);
+    if (!hit) {
+      dropTarget.value = null;
+      return;
+    }
+    const { paneId } = hit;
+    const source = paneForTab(workspace.value, tabId);
+    const canEdge = workspace.value.panes.length < MAX_PANES;
+    const frame = splitHost.value?.querySelector<HTMLElement>(`[data-pane-id="${CSS.escape(paneId)}"]`);
+    const edge =
+      hit.edge ??
+      (canEdge && frame ? dropEdge(frame.getBoundingClientRect(), move.clientX, move.clientY) : null);
+    const splitOwnPane = source?.id === paneId && (source?.tabIds.length ?? 0) > 1;
+    if (edge && canEdge && (source?.id !== paneId || splitOwnPane)) {
+      dropTarget.value = { paneId, edge };
+      return;
+    }
+    if (source?.id !== paneId) {
+      dropTarget.value = { paneId };
+      return;
+    }
+    const node = document.elementFromPoint(move.clientX, move.clientY);
+    const tabEl = node instanceof Element ? node.closest<HTMLElement>("[data-tab-id]") : null;
+    const overId = tabEl?.dataset.tabId;
+    if (overId && overId !== tabId) {
+      const box = tabEl.getBoundingClientRect();
+      dropTarget.value = { paneId, afterId: move.clientX > box.left + box.width / 2 ? overId : undefined };
+      if (move.clientX <= box.left + box.width / 2) {
+        const pane = findPane(workspace.value, paneId);
+        const index = pane?.tabIds.indexOf(overId) ?? -1;
+        dropTarget.value = { paneId, afterId: index > 0 ? pane?.tabIds[index - 1] : undefined };
+      }
+      return;
+    }
+    dropTarget.value = { paneId };
+  };
+
+  const onUp = () => {
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    window.removeEventListener("pointercancel", onUp);
+    document.body.classList.remove("dragging-tab");
+    const target = dropTarget.value;
+    draggingTabId.value = "";
+    dropTarget.value = null;
+    if (!started || !target) {
+      return;
+    }
+    applyTabDrop(tabId, target);
+  };
+
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
+  window.addEventListener("pointercancel", onUp);
+}
+
+function applyTabDrop(tabId: string, target: { paneId: string; afterId?: string; edge?: DropEdge }) {
+  if (target.edge) {
+    const direction = edgeToDirection(target.edge);
+    if (!ensureCanSplit(direction)) {
+      return;
+    }
+    const source = paneForTab(workspace.value, tabId);
+    if (!source || (source.tabIds.length <= 1 && source.id === target.paneId && workspace.value.panes.length < 2)) {
+      return;
+    }
+    let next = workspace.value;
+    if (source.id !== target.paneId || source.tabIds.length > 1) {
+      next = { ...next, focusedPaneId: target.paneId };
+      next = removeTabFromWorkspace(next, tabId);
+      if (!findPane(next, target.paneId)) {
+        next = focusPane(next, next.focusedPaneId);
+      } else {
+        next = focusPane(next, target.paneId);
+      }
+      const pane = emptyPane([tabId], tabId);
+      const result = splitFocused(next, pane, direction);
+      if ("error" in result) {
+        workspace.value = addTabToPane(workspace.value, workspace.value.focusedPaneId, tabId);
+      } else {
+        workspace.value = result;
+        flashPane(pane.id);
+      }
+      scheduleSaveTableTabs();
+      flashTab(tabId);
+    }
+    return;
+  }
+  workspace.value = moveTab(workspace.value, tabId, target.paneId, target.afterId);
+  scheduleSaveTableTabs();
 }
 
 function selectView(next: ConnectionViewTab) {
@@ -708,11 +1539,49 @@ function dirtyTableViews() {
   return [...dirtyTabs.value.keys()].flatMap((id) => tableViews.get(id) ?? []);
 }
 
+/**
+ * Row edits from different tabs on the same table that set one cell to
+ * different values. Saves run in tab order, so the rightmost tab's value wins.
+ */
+function editConflicts(requests: SaveRequest[]) {
+  const seen = new Map<string, { value: unknown; tab: number }>();
+  const conflicts: string[] = [];
+  requests.forEach((request, tab) => {
+    for (const update of request.updates) {
+      const row = update.key.map((cell) => `${cell.column} = ${cell.value}`).join(", ");
+      for (const change of update.changes) {
+        const key = JSON.stringify([request.namespace, request.table, update.key, change.column]);
+        const earlier = seen.get(key);
+        if (earlier && earlier.tab !== tab && earlier.value !== change.value) {
+          conflicts.push(`${request.table}.${change.column} where ${row}`);
+        }
+        seen.set(key, { value: change.value, tab });
+      }
+    }
+  });
+  return conflicts;
+}
+
 async function saveAll() {
   if (saving.value) {
     return;
   }
-  const pending = [...tableViews.values()].map((view) => ({ view, ...view.pendingChanges() }));
+  const pending = tabs.value.flatMap((tab) => {
+    const view = tab.kind === "table" ? tableViews.get(tab.id) : undefined;
+    return view ? [{ view, ...view.pendingChanges() }] : [];
+  });
+  const conflicts = editConflicts(pending.map((item) => item.request));
+  if (conflicts.length) {
+    const listed = conflicts.slice(0, 3).join("\n");
+    const more = conflicts.length > 3 ? `\n…and ${conflicts.length - 3} more` : "";
+    const ok = await confirm(
+      `Two tabs change the same cell to different values:\n${listed}${more}\n\nThe value from the tab furthest to the right will be saved.`,
+      { title: "Conflicting edits", kind: "warning", okLabel: "Save anyway", cancelLabel: "Cancel" },
+    );
+    if (!ok) {
+      return;
+    }
+  }
   const changed = pending.filter(
     ({ request }) =>
       request.updates.length ||
@@ -821,8 +1690,17 @@ function removeTab(id: string) {
     if (activeQueryTabId.value === id) {
       activeQueryTabId.value = next || (connectionSaved.value.length ? SAVED_TAB_ID : "");
     }
-  } else if (activeTableTabId.value === id) {
-    activeTableTabId.value = next;
+  } else {
+    tabActivity.delete(id);
+    setFilterIndicator(id, { count: 0, summary: "", preview: null });
+    if (filterPopover.value?.tabId === id) {
+      filterPopover.value = null;
+    }
+    if (renamingTabId.value === id) {
+      renamingTabId.value = "";
+    }
+    workspace.value = removeTabFromWorkspace(workspace.value, id);
+    scheduleSaveTableTabs();
   }
 }
 
@@ -837,11 +1715,35 @@ function closeActivePaneTab() {
   return true;
 }
 
+function baseTableTitle(tab: TableTab) {
+  return tab.namespace === namespace.value ? tab.table : `${tab.namespace}.${tab.table}`;
+}
+
 function tabTitle(tab: PaneTab) {
   if (tab.kind === "query") {
     return savedFor(tab)?.name ?? tab.title;
   }
-  return tab.namespace === namespace.value ? tab.table : `${tab.namespace}.${tab.table}`;
+  return tab.title || `${baseTableTitle(tab)}${tableTitleSuffix.value.get(tab.id) ?? ""}`;
+}
+
+function tabTooltip(tab: PaneTab) {
+  if (tab.kind === "query") {
+    return modifiedQueries.value.has(tab.id) ? `${tabTitle(tab)} (unsaved changes)` : tabTitle(tab);
+  }
+  return `${tab.namespace}.${tab.table}`;
+}
+
+/** Lists a tab's applied filters while the pointer is over its funnel icon. */
+function showFilterPopover(event: MouseEvent, tabId: string) {
+  window.clearTimeout(filterPopoverTimer);
+  filterPopover.value = { tabId, anchor: (event.currentTarget as HTMLElement).getBoundingClientRect() };
+}
+
+function hideFilterPopover() {
+  window.clearTimeout(filterPopoverTimer);
+  filterPopoverTimer = window.setTimeout(() => {
+    filterPopover.value = null;
+  }, 80);
 }
 
 function setEditorRef(id: string, instance: unknown) {
@@ -904,6 +1806,7 @@ async function connect(withPassword: string | null = null) {
     status.value = "connected";
     if (!tabsRestored.value) {
       restoreQueryTabs();
+      restoreTableTabs();
     }
     await loadTables();
   } catch (err) {
@@ -1009,16 +1912,10 @@ function startRename(name: string) {
 
 async function renameNamespace(from: string, to: string) {
   await api.renameDatabase(props.sessionId, from, to);
-  tabs.value = tabs.value.map((tab) => {
-    if (tab.kind !== "table" || tab.namespace !== from) {
-      return tab;
-    }
-    const id = `table:${to}.${tab.table}`;
-    if (activeTableTabId.value === tab.id) {
-      activeTableTabId.value = id;
-    }
-    return { ...tab, id, namespace: to };
-  });
+  tabs.value = tabs.value.map((tab) =>
+    tab.kind === "table" && tab.namespace === from ? { ...tab, namespace: to } : tab,
+  );
+  scheduleSaveTableTabs();
   const wasCurrent = namespace.value === from;
   await refreshNamespaces();
   if (wasCurrent) {
@@ -1136,7 +2033,7 @@ async function reconnect() {
     lost.value = false;
     lostError.value = "";
     await loadTables();
-    void tableViews.get(activeTableTabId.value)?.refresh();
+    refreshVisibleTables();
   } catch (err) {
     lostError.value = String(err);
   } finally {
@@ -1237,7 +2134,7 @@ function autoFitSidebar() {
   const font = getComputedStyle(name);
   const base = `${font.fontWeight} ${font.fontSize} ${font.fontFamily}`;
   const longest = tables.value.reduce((max, table) => {
-    const dirty = dirtyTabs.value.has(`table:${namespace.value}.${table.name}`);
+    const dirty = dirtyTableKeys.value.has(tableKey(namespace.value, table.name));
     context.font = dirty ? `italic ${base}` : base;
     return Math.max(max, context.measureText(table.name).width + (dirty ? 12 : 0));
   }, 0);
@@ -1260,9 +2157,16 @@ function autoFitSidebar() {
 let stopLost: UnlistenFn | null = null;
 let stopRestored: UnlistenFn | null = null;
 
+function flushTableTabs() {
+  if (tableTabsSaveTimer && !extraTab.value) {
+    saveTableTabs();
+  }
+}
+
 onMounted(() => {
   window.addEventListener("keydown", onWindowKeydown, true);
   window.addEventListener("focus", onWindowFocus);
+  window.addEventListener("beforeunload", flushTableTabs);
   void listen<ConnectionEvent>("connection-lost", (event) => onConnectionLost(event.payload)).then(
     (unlisten) => {
       stopLost = unlisten;
@@ -1286,6 +2190,7 @@ const unregisterCloser = registerInnerTabCloser(props.sessionId, closeActivePane
 onUnmounted(() => {
   window.removeEventListener("keydown", onWindowKeydown, true);
   window.removeEventListener("focus", onWindowFocus);
+  window.removeEventListener("beforeunload", flushTableTabs);
   stopLost?.();
   stopRestored?.();
   closeMenus();
@@ -1293,12 +2198,16 @@ onUnmounted(() => {
   setLiveTitle(props.sessionId, "");
   void api.disconnect(props.sessionId).catch(() => undefined);
   if (extraTab.value) {
+    window.clearTimeout(tableTabsSaveTimer);
     for (const tab of tabs.value) {
       if (tab.kind === "query") {
         localStorage.removeItem(`recon.query.${tab.key}`);
       }
     }
     localStorage.removeItem(queryTabsKey.value);
+    localStorage.removeItem(tableTabsKey.value);
+  } else if (tableTabsSaveTimer) {
+    saveTableTabs();
   }
 });
 </script>
@@ -1496,22 +2405,22 @@ onUnmounted(() => {
               class="db-table"
               type="button"
               role="option"
-              :aria-selected="selectedTables.has(table.name) || activeTableTabId === `table:${namespace}.${table.name}`"
+              :aria-selected="selectedTables.has(table.name) || activeTableKey === tableKey(namespace, table.name)"
               :class="{
-                active: activeTableTabId === `table:${namespace}.${table.name}`,
+                active: activeTableKey === tableKey(namespace, table.name),
                 selected: selectedTables.has(table.name),
                 view: table.kind === 'view',
-                dirty: dirtyTabs.has(`table:${namespace}.${table.name}`),
+                dirty: dirtyTableKeys.has(tableKey(namespace, table.name)),
               }"
               :title="
-                dirtyTabs.has(`table:${namespace}.${table.name}`)
+                dirtyTableKeys.has(tableKey(namespace, table.name))
                   ? `${table.name} (unsaved changes)`
                   : table.kind === 'view'
-                    ? `${table.name} (view)`
-                    : table.name
+                    ? `${table.name} (view) · double-click to open in a new tab`
+                    : `${table.name} · double-click to open in a new tab`
               "
               @click="onTableClick($event, table)"
-              @dblclick="!$event.metaKey && !$event.shiftKey && queryTable(table)"
+              @dblclick="onTableDblclick($event, table)"
               @contextmenu="openTableMenu($event, table)"
             >
               <svg v-if="table.kind === 'view'" viewBox="0 0 16 16" aria-hidden="true">
@@ -1524,7 +2433,7 @@ onUnmounted(() => {
               </svg>
               <span class="db-table-name">{{ table.name }}</span>
               <span
-                v-if="dirtyTabs.has(`table:${namespace}.${table.name}`)"
+                v-if="dirtyTableKeys.has(tableKey(namespace, table.name))"
                 class="dirty-dot"
                 aria-label="Unsaved changes"
               />
@@ -1546,7 +2455,13 @@ onUnmounted(() => {
           :connection-name="entry?.name ?? ''"
         />
         <section v-show="view !== 'history'" class="db-main">
-          <div v-if="viewTabs.length || view === 'sql'" class="subtab-bar" role="tablist">
+          <div
+            v-if="view === 'sql' && (viewTabs.length || showSavedTab)"
+            ref="subtabBar"
+            class="subtab-bar"
+            role="tablist"
+            @wheel="onSubtabWheel"
+          >
             <div
               v-if="showSavedTab"
               class="subtab saved-tab"
@@ -1571,18 +2486,14 @@ onUnmounted(() => {
                 query: tab.kind === 'query',
                 saved: Boolean(savedFor(tab)),
                 dirty: dirtyTabs.has(tab.id) || modifiedQueries.has(tab.id),
+                'tab-flash': flashTabId === tab.id,
               }"
+              :data-tab-id="tab.id"
               role="tab"
               :aria-selected="activeTabId === tab.id"
-              :title="
-                tab.kind === 'table'
-                  ? `${tab.namespace}.${tab.table}`
-                  : modifiedQueries.has(tab.id)
-                    ? `${tabTitle(tab)} (unsaved changes)`
-                    : tabTitle(tab)
-              "
+              :title="filterPopover?.tabId === tab.id ? undefined : tabTooltip(tab)"
               @click="selectTab(tab)"
-              @dblclick="tab.kind === 'query' && startTabRename(tab)"
+              @dblclick="startTabRename(tab)"
               @contextmenu="openTabMenu($event, tab)"
               @auxclick.middle="closeTab(tab.id)"
             >
@@ -1592,6 +2503,18 @@ onUnmounted(() => {
               <svg v-else-if="tab.kind === 'query'" class="subtab-icon" viewBox="0 0 16 16" aria-hidden="true">
                 <path d="M5 4 1.5 8 5 12M11 4l3.5 4L11 12" />
               </svg>
+              <span
+                v-else-if="filteredTabs.has(tab.id)"
+                class="subtab-filter"
+                :aria-label="`${filteredTabs.get(tab.id)?.count} ${filteredTabs.get(tab.id)?.count === 1 ? 'filter' : 'filters'} applied: ${filteredTabs.get(tab.id)?.summary}`"
+                @mouseenter="showFilterPopover($event, tab.id)"
+                @mouseleave="hideFilterPopover"
+              >
+                <svg class="subtab-icon" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M2.5 3h11L9.2 8.2v4.3l-2.4 1.2V8.2L2.5 3Z" />
+                </svg>
+                <span class="subtab-filter-dot" aria-hidden="true" />
+              </span>
               <svg v-else class="subtab-icon" viewBox="0 0 16 16" aria-hidden="true">
                 <rect x="2" y="3" width="12" height="10" rx="1.5" />
                 <path d="M2 6.5h12M6.5 6.5V13" />
@@ -1635,9 +2558,11 @@ onUnmounted(() => {
               +
             </button>
           </div>
-          <div v-if="!viewTabs.length && !(showSavedTab && activeTabId === SAVED_TAB_ID)" class="db-empty muted">
-            <p v-if="view === 'sql'">No open queries. Use + to start one.</p>
-            <p v-else>Pick a table on the left, or double-click one to query it.</p>
+          <div
+            v-if="view === 'sql' && !viewTabs.length && !(showSavedTab && activeTabId === SAVED_TAB_ID)"
+            class="db-empty muted"
+          >
+            <p>No open queries. Use + to start one.</p>
           </div>
           <SavedQueries
             v-if="connectionSaved.length"
@@ -1649,27 +2574,12 @@ onUnmounted(() => {
             @run="openSavedQuery($event, true)"
           />
           <div
-            v-for="tab in tabs"
-            v-show="activeTabId === tab.id"
+            v-for="tab in queryTabs"
+            v-show="view === 'sql' && activeQueryTabId === tab.id"
             :key="tab.id"
             class="db-main-pane"
           >
-            <TableView
-              v-if="tab.kind === 'table'"
-              :connection-id="sessionId"
-              :namespace="tab.namespace"
-              :table="tab.table"
-              :kind="tab.tableKind"
-              :driver="driver"
-              :filter="tab.filter"
-              :ref="(instance) => setTableViewRef(tab.id, instance)"
-              :active="active && view === 'tables' && activeTableTabId === tab.id"
-              @changes="setTabChanges(tab.id, $event)"
-              @follow="followLink"
-              @clear-filter="setTableFilter(tab.id, undefined)"
-            />
             <QueryEditor
-              v-else
               :ref="(instance) => setEditorRef(tab.id, instance)"
               :connection-id="sessionId"
               :driver="driver"
@@ -1681,6 +2591,70 @@ onUnmounted(() => {
               @executed="onExecuted"
               @modified="setQueryModified(tab.id, $event)"
             />
+          </div>
+          <div v-show="view === 'tables'" ref="splitHost" class="split-workspace-host">
+            <SplitWorkspace
+              :node="workspace.layout"
+              :focused-pane-id="workspace.focusedPaneId"
+              :flash-pane-id="flashPaneId"
+              :pane-count="workspace.panes.length"
+              :drop-pane-id="dropHoverPaneId || (dropTarget?.edge ? dropTarget.paneId : '')"
+              :drop-edge="dropTarget?.edge ?? null"
+              :drop-preview-title="dropTarget?.edge && dragTableTab ? tabTitle(dragTableTab) : ''"
+              :drop-preview-filtered="Boolean(dropTarget?.edge && dragTableTab && filteredTabs.has(dragTableTab.id))"
+              @focus="onFocusPane"
+              @resize="onSplitResize"
+              @reset="onSplitReset"
+            >
+              <template #default="{ paneId }">
+                <TablePaneFrame
+                  :pane-id="paneId"
+                  :focused="workspace.focusedPaneId === paneId"
+                  :tabs="paneTabInfos(paneId)"
+                  :active-tab-id="findPane(workspace, paneId)?.activeTabId ?? ''"
+                  :renaming-tab-id="renamingTabId"
+                  :rename-value="renameValue"
+                  :dragging-tab-id="draggingTabId"
+                  :drop-after-id="dropTarget && dropTarget.paneId === paneId ? dropTarget.afterId ?? null : null"
+                  :drop-hover="dropHoverPaneId === paneId"
+                  @focus="onFocusPane(paneId)"
+                  @select="(id) => { const tab = tabs.find((item) => item.id === id); if (tab) selectTab(tab); }"
+                  @close="closeTab"
+                  @menu="(event, id) => { const tab = tabs.find((item) => item.id === id); if (tab) openTabMenu(event, tab); }"
+                  @rename-start="(id) => { const tab = tabs.find((item) => item.id === id); if (tab) startTabRename(tab); }"
+                  @update:rename-value="renameValue = $event"
+                  @rename-commit="commitTabRename"
+                  @rename-cancel="cancelTabRename"
+                  @filter-enter="showFilterPopover"
+                  @filter-leave="hideFilterPopover"
+                  @tab-pointer-down="onTabPointerDown"
+                >
+                  <div
+                    v-for="tab in tableTabsInPane(paneId)"
+                    v-show="findPane(workspace, paneId)?.activeTabId === tab.id"
+                    :key="tab.id"
+                    class="db-main-pane"
+                  >
+                    <TableView
+                      :connection-id="sessionId"
+                      :driver="driver"
+                      :view="tab"
+                      :ref="(instance) => setTableViewRef(tab.id, instance)"
+                      :active="active && view === 'tables' && workspace.focusedPaneId === paneId && findPane(workspace, paneId)?.activeTabId === tab.id"
+                      :visible="active && view === 'tables' && findPane(workspace, paneId)?.activeTabId === tab.id"
+                      @changes="setTabChanges(tab.id, $event)"
+                      @follow="onTableFollow"
+                      @update:view="updateView(tab.id, $event)"
+                      @filter-state="setFilterIndicator(tab.id, $event)"
+                      @open-sql="openQueryTab($event)"
+                    />
+                  </div>
+                  <div v-if="!tableTabsInPane(paneId).length" class="db-empty muted">
+                    <p>Pick a table on the left. Double-click one to open another tab on it.</p>
+                  </div>
+                </TablePaneFrame>
+              </template>
+            </SplitWorkspace>
           </div>
         </section>
       </div>
@@ -1741,6 +2715,18 @@ onUnmounted(() => {
             <button class="overflow-menu-item" type="button" role="menuitem" @click="runTableAction('open')">
               Open
             </button>
+            <button class="overflow-menu-item" type="button" role="menuitem" @click="runTableAction('openNew')">
+              Open in new tab
+            </button>
+            <button
+              class="overflow-menu-item"
+              type="button"
+              role="menuitem"
+              :disabled="workspace.panes.length >= MAX_PANES && !otherPanes(workspace.focusedPaneId).length"
+              @click="runTableAction('openSide')"
+            >
+              Open to the side
+            </button>
             <button class="overflow-menu-item" type="button" role="menuitem" @click="runTableAction('query')">
               Query
             </button>
@@ -1792,7 +2778,122 @@ onUnmounted(() => {
             </button>
           </template>
         </div>
+        <div
+          v-if="tabMenu && menuTableTab"
+          ref="tabMenuEl"
+          class="overflow-menu-dropdown table-context-menu"
+          role="menu"
+          :aria-label="`${tabTitle(menuTableTab)} actions`"
+          :style="{ left: `${tabMenu.x}px`, top: `${tabMenu.y}px` }"
+          @contextmenu.prevent
+        >
+          <button class="overflow-menu-item" type="button" role="menuitem" @click="duplicateTableTab(menuTableTab)">
+            Duplicate tab
+          </button>
+          <button
+            class="overflow-menu-item"
+            type="button"
+            role="menuitem"
+            :disabled="workspace.panes.length >= MAX_PANES"
+            @click="splitTableTab(menuTableTab, 'right')"
+          >
+            Split right
+          </button>
+          <button
+            class="overflow-menu-item"
+            type="button"
+            role="menuitem"
+            :disabled="workspace.panes.length >= MAX_PANES"
+            @click="splitTableTab(menuTableTab, 'down')"
+          >
+            Split down
+          </button>
+          <button
+            v-if="workspace.panes.length === 2 && otherPanes().length"
+            class="overflow-menu-item"
+            type="button"
+            role="menuitem"
+            @click="moveMenuTabToPane(otherPanes()[0].id)"
+          >
+            Move to other pane
+          </button>
+          <template v-else-if="workspace.panes.length > 2">
+            <button
+              v-for="pane in otherPanes()"
+              :key="pane.id"
+              class="overflow-menu-item"
+              type="button"
+              role="menuitem"
+              @click="moveMenuTabToPane(pane.id)"
+            >
+              Move to {{ pane.label }}
+            </button>
+          </template>
+          <button class="overflow-menu-item" type="button" role="menuitem" @click="startTabRename(menuTableTab)">
+            Rename…
+          </button>
+          <button
+            v-if="menuTableTab.title"
+            class="overflow-menu-item"
+            type="button"
+            role="menuitem"
+            @click="resetTableTitle(menuTableTab)"
+          >
+            Reset name
+          </button>
+          <div class="overflow-menu-divider" role="separator" />
+          <button class="overflow-menu-item" type="button" role="menuitem" @click="closeTableTab(menuTableTab)">
+            Close tab
+          </button>
+          <button
+            class="overflow-menu-item"
+            type="button"
+            role="menuitem"
+            :disabled="!tableTabsBeside(menuTableTab, 'others').length"
+            @click="closeTableTabs(menuTableTab, 'others')"
+          >
+            Close other tabs
+          </button>
+          <button
+            class="overflow-menu-item"
+            type="button"
+            role="menuitem"
+            :disabled="!tableTabsBeside(menuTableTab, 'left').length"
+            @click="closeTableTabs(menuTableTab, 'left')"
+          >
+            Close tabs to the left
+          </button>
+          <button
+            class="overflow-menu-item"
+            type="button"
+            role="menuitem"
+            :disabled="!tableTabsBeside(menuTableTab, 'right').length"
+            @click="closeTableTabs(menuTableTab, 'right')"
+          >
+            Close tabs to the right
+          </button>
+          <template v-if="workspace.panes.length > 1">
+            <div class="overflow-menu-divider" role="separator" />
+            <button
+              class="overflow-menu-item"
+              type="button"
+              role="menuitem"
+              @click="closeWorkspacePane(paneForTab(workspace, menuTableTab.id)?.id ?? '')"
+            >
+              Close pane
+            </button>
+            <button class="overflow-menu-item" type="button" role="menuitem" @click="mergeWorkspacePanes">
+              Merge all panes
+            </button>
+          </template>
+        </div>
       </Teleport>
+      <FilterPopover
+        v-if="filterPopover && popoverFilters"
+        :preview="popoverFilters.preview"
+        :count="popoverFilters.count"
+        :anchor="filterPopover.anchor"
+      />
       <Modal v-if="saveDialog" title="Save query" @close="closeSaveDialog">
         <form class="save-query-form" @submit.prevent="submitSaveDialog">
           <label class="modal-label">

@@ -1,3 +1,6 @@
+import type { WireNode } from "./filters/compile";
+import type { FilterKind } from "./filters/model";
+
 export type Driver = "mysql" | "postgres" | "sqlite";
 export type SslMode = "disable" | "prefer" | "require";
 
@@ -87,6 +90,7 @@ export interface AppData {
   queryRowLimit?: number;
   sidebarWidth?: number;
   maxAutoColumnWidth?: number;
+  autoApplyFilters?: boolean;
   window?: WindowState;
 }
 
@@ -101,6 +105,7 @@ export interface PreferencesPatch {
   queryRowLimit?: number;
   sidebarWidth?: number;
   maxAutoColumnWidth?: number;
+  autoApplyFilters?: boolean;
 }
 
 export interface BytesCell {
@@ -139,6 +144,8 @@ export interface ColumnDetail {
   defaultValue: string | null;
   primaryKey: boolean;
   extra: string;
+  filterKind: FilterKind;
+  enumValues: string[];
 }
 
 export interface IndexInfo {
@@ -178,7 +185,11 @@ export interface BrowseRequest {
   orderBy?: string | null;
   orderDir?: SortDirection | null;
   count: boolean;
-  filter?: CellEdit[];
+  filter?: WireNode | null;
+  /** Minutes east of UTC. */
+  utcOffset?: number;
+  /** Lets `cancelBrowse` stop the query while it runs. */
+  requestId?: string;
 }
 
 /* Opens `table` showing only rows where every filter column equals its value. */

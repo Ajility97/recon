@@ -536,6 +536,9 @@ pub fn update_preferences(
         data.max_auto_column_width =
             value.clamp(MAX_AUTO_COLUMN_WIDTH_MIN, MAX_AUTO_COLUMN_WIDTH_MAX);
     }
+    if let Some(value) = patch.auto_apply_filters {
+        data.auto_apply_filters = value;
+    }
     persist::save(&app, &data)?;
     Ok(data.clone())
 }
