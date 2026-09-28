@@ -6,7 +6,7 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
-    version: "0.7.0",
+    version: "0.6.0",
     date: "September 27, 2026",
     notes: [
       "Filter a table with the Filter button or ⌘F. Each condition offers the operators that fit its column type, conditions can be combined with All or Any and grouped, and values are checked against the column before the query runs. Show SQL displays the query the filters produce.",
@@ -20,12 +20,6 @@ export const CHANGELOG: ChangelogRelease[] = [
       "Refresh a table with the refresh button or ⌘R, and choose how many rows each tab loads, up to 500. A bar under the grid shows how long the rows took to load, which rows are showing, and the page controls.",
       "Auto refresh reloads a table on a timer. Pick an interval from the arrow beside the refresh button or enter your own in minutes and seconds. A green dot on the button shows it's on, and the bar under the grid counts down to the next refresh. It waits while you have unsaved edits and stops while the table is hidden, off-screen, or Recon isn't the active window.",
       "When a tab strip overflows, its scrollbar sits above the tabs, and the mouse wheel scrolls it sideways. The wheel also scrolls a wide grid sideways when it has nothing to scroll vertically.",
-    ],
-  },
-  {
-    version: "0.6.0",
-    date: "September 27, 2026",
-    notes: [
       "Choose Duplicate connection from a connection's menu to open a new connection form filled in with its settings, including SSH, and named Copy of followed by the original name. Passwords and SSH secrets aren't copied, so enter them before saving.",
     ],
   },
