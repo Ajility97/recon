@@ -18,7 +18,7 @@ export const CHANGELOG: ChangelogRelease[] = [
       "Double-click a table in the sidebar, or Option-click it, to open it in another tab.",
       "Split the tables view into up to six panes and drag tabs between them. Each pane has its own tabs, filters, and scroll position, and the layout is saved.",
       "Refresh a table with the refresh button or ⌘R, and choose how many rows each tab loads, up to 500. A bar under the grid shows how long the rows took to load, which rows are showing, and the page controls.",
-      "Auto refresh reloads a table on a timer. Pick an interval from the clock menu or enter your own in minutes and seconds, and the bar under the grid counts down to the next refresh. It waits while you have unsaved edits and stops while the table is hidden, off-screen, or Recon isn't the active window.",
+      "Auto refresh reloads a table on a timer. Pick an interval from the arrow beside the refresh button or enter your own in minutes and seconds. A green dot on the button shows it's on, and the bar under the grid counts down to the next refresh. It waits while you have unsaved edits and stops while the table is hidden, off-screen, or Recon isn't the active window.",
       "When a tab strip overflows, its scrollbar sits above the tabs, and the mouse wheel scrolls it sideways. The wheel also scrolls a wide grid sideways when it has nothing to scroll vertically.",
     ],
   },

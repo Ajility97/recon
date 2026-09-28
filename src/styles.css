@@ -3040,6 +3040,34 @@ button.view-tab.active:hover:not(:disabled) {
   padding: 0.2rem 0.35rem;
 }
 
+.refresh-split {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.pane-toolbar .refresh-split button.refresh-main {
+  position: relative;
+  min-width: 1.6rem;
+  justify-content: center;
+  padding: 0.2rem 0.35rem;
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.pane-toolbar .refresh-split button.refresh-caret {
+  width: 1rem;
+  justify-content: center;
+  padding: 0.2rem 0;
+  border-left: 0;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+.pane-toolbar .refresh-caret .button-icon {
+  width: 0.75rem;
+  height: 0.75rem;
+}
+
 .auto-refresh-dot {
   position: absolute;
   right: 0.06rem;
@@ -3047,11 +3075,8 @@ button.view-tab.active:hover:not(:disabled) {
   width: 0.38rem;
   height: 0.38rem;
   border-radius: 50%;
-  box-shadow: 0 0 0 1.5px var(--bg);
-}
-
-.auto-refresh.enabled .auto-refresh-dot {
   background: var(--good);
+  box-shadow: 0 0 0 1.5px var(--bg);
 }
 
 .auto-refresh-fields {
@@ -3417,7 +3442,16 @@ button.view-tab.active:hover:not(:disabled) {
 .filter-row.filter-flash,
 .filter-subgroup-card.filter-flash {
   border-radius: 6px;
-  animation: new-item-flash 1.8s ease-out;
+  animation: new-filter-flash 1.8s ease-out;
+}
+
+/* Inset, so the ring isn't clipped by the scrolling filter list. */
+@keyframes new-filter-flash {
+  from,
+  30% {
+    background-color: color-mix(in srgb, var(--good) 12%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--good) 65%, transparent);
+  }
 }
 
 /* No end frame, so the highlight fades into the element's own background. */

@@ -28,6 +28,7 @@ import {
   clampTabPageSize,
   conditions as allConditions,
   formatAutoRefresh,
+  formatCountdown,
   newCondition,
   newId,
   renameColumn,
@@ -385,7 +386,7 @@ const autoRefreshRemaining = computed(() => {
   if (left <= 0) {
     return "Refreshing…";
   }
-  return `Refreshing in ${formatAutoRefresh(Math.ceil(left / 1000) * 1000)}`;
+  return `Refreshing in ${formatCountdown(left)}`;
 });
 const canInsert = computed(
   () => kind.value === "table" && Boolean(result.value) && Boolean(structure.value),
@@ -602,6 +603,9 @@ function refresh() {
     applied.value = appliedFrom(current);
   }
   void loadData(true, false);
+  if (autoRefreshArmed.value) {
+    startAutoRefreshTimer();
+  }
 }
 
 function isAutoRefreshPreset(ms: number) {
@@ -1444,10 +1448,27 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
         </button>
       </span>
       <div class="pane-toolbar-end">
-        <div class="overflow-menu auto-refresh-menu">
+        <div class="overflow-menu auto-refresh-menu refresh-split">
           <button
-            class="ghost tiny icon-only auto-refresh"
-            :class="{ enabled: autoRefreshOn }"
+            class="ghost tiny refresh-main"
+            type="button"
+            :title="refreshing ? 'Loading…' : 'Refresh (⌘R)'"
+            :aria-label="refreshing ? 'Loading' : 'Refresh'"
+            aria-keyshortcuts="Meta+R"
+            :disabled="refreshing"
+            @click="refresh"
+          >
+            <span v-if="refreshing" class="spinner" aria-hidden="true" />
+            <svg v-else class="button-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M21 2v6h-6" />
+              <path d="M3 12a9 9 0 0 1 15.48-6.36L21 8" />
+              <path d="M3 22v-6h6" />
+              <path d="M21 12a9 9 0 0 1-15.48 6.36L3 16" />
+            </svg>
+            <span v-if="autoRefreshOn" class="auto-refresh-dot" aria-hidden="true" />
+          </button>
+          <button
+            class="ghost tiny refresh-caret"
             type="button"
             :title="autoRefreshTitle"
             :aria-label="autoRefreshTitle"
@@ -1456,11 +1477,8 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
             @click="toggleAutoRefreshMenu"
           >
             <svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true">
-              <circle cx="12" cy="12" r="9" />
-              <path d="M12 7v5l3.46 2" />
-              <path d="m16.6 19.2 2.7 2.3 2.7-2.3" />
+              <path d="m7 10 5 5 5-5" />
             </svg>
-            <span v-if="autoRefreshOn" class="auto-refresh-dot" aria-hidden="true" />
           </button>
           <div v-if="autoRefreshMenuOpen" class="overflow-menu-dropdown" role="menu" aria-label="Auto refresh">
             <button
@@ -1510,23 +1528,6 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
             </button>
           </div>
         </div>
-        <button
-          class="ghost tiny icon-only"
-          type="button"
-          :title="refreshing ? 'Loading…' : 'Refresh (⌘R)'"
-          :aria-label="refreshing ? 'Loading' : 'Refresh'"
-          aria-keyshortcuts="Meta+R"
-          :disabled="refreshing"
-          @click="refresh"
-        >
-          <span v-if="refreshing" class="spinner" aria-hidden="true" />
-          <svg v-else class="button-icon" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M21 2v6h-6" />
-            <path d="M3 12a9 9 0 0 1 15.48-6.36L21 8" />
-            <path d="M3 22v-6h6" />
-            <path d="M21 12a9 9 0 0 1-15.48 6.36L3 16" />
-          </svg>
-        </button>
       </div>
     </div>
 

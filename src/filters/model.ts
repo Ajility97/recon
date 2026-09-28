@@ -129,6 +129,16 @@ export function formatAutoRefresh(ms: number) {
   return `${Math.max(1, Math.round(ms / 1000))} s`;
 }
 
+export function formatCountdown(ms: number) {
+  const total = Math.max(0, Math.ceil(ms / 1000));
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  if (minutes === 0) {
+    return `${seconds}s`;
+  }
+  return seconds === 0 ? `${minutes}m` : `${minutes}m ${seconds}s`;
+}
+
 export function sanitizeAutoRefresh(value: unknown): AutoRefreshState | undefined {
   if (!value || typeof value !== "object" || (value as { paused?: unknown }).paused === true) {
     return undefined;
