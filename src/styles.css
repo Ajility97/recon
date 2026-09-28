@@ -3054,8 +3054,11 @@ button.view-tab.active:hover:not(:disabled) {
   background: var(--good);
 }
 
-.auto-refresh.paused .auto-refresh-dot {
-  background: var(--warn);
+.auto-refresh-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.6rem;
+  margin-top: 0.35rem;
 }
 
 .auto-refresh-menu .overflow-menu-dropdown {

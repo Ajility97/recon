@@ -6,6 +6,23 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "0.7.0",
+    date: "September 27, 2026",
+    notes: [
+      "Filter a table with the Filter button or ⌘F. Each condition offers the operators that fit its column type, conditions can be combined with All or Any and grouped, and values are checked against the column before the query runs. Show SQL displays the query the filters produce.",
+      "Filter value fields suggest values from the table as you type, drawn from a sample of rows so large tables stay fast.",
+      "Date filters can match Today, Yesterday, or Tomorrow, which stay current each time the tab loads, and time-zone-aware PostgreSQL columns use your computer's time zone.",
+      "Each table tab keeps its own filters, and they're saved with your open tabs. A filtered tab shows a blue funnel, and a collapsed filter panel shows a summary of the active filters. Hover the funnel, the Filter button, or the summary to see every condition.",
+      "Filters reload the rows as you edit them. Turn off Apply filters automatically in Settings to wait for Apply instead, which helps on large tables.",
+      "Filtered queries and row counts can be cancelled, and a count that takes too long gives up instead of holding up the table.",
+      "Double-click a table in the sidebar, or Option-click it, to open it in another tab.",
+      "Split the tables view into up to six panes and drag tabs between them. Each pane has its own tabs, filters, and scroll position, and the layout is saved.",
+      "Refresh a table with the refresh button or ⌘R, and choose how many rows each tab loads, up to 500. A bar under the grid shows how long the rows took to load, which rows are showing, and the page controls.",
+      "Auto refresh reloads a table on a timer. Pick an interval from the clock menu or enter your own in minutes and seconds, and the bar under the grid counts down to the next refresh. It waits while you have unsaved edits and stops while the table is hidden, off-screen, or Recon isn't the active window.",
+      "When a tab strip overflows, its scrollbar sits above the tabs, and the mouse wheel scrolls it sideways. The wheel also scrolls a wide grid sideways when it has nothing to scroll vertically.",
+    ],
+  },
+  {
     version: "0.6.0",
     date: "September 27, 2026",
     notes: [

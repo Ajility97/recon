@@ -355,17 +355,13 @@ const {
   close: closeAutoRefreshMenu,
 } = useOverflowMenu(() => autoRefreshMenuId);
 const customRefresh = ref(false);
+const customRefreshMinutes = ref(0);
 const customRefreshSeconds = ref(30);
 const autoRefresh = computed(() => props.view.autoRefresh);
-const autoRefreshOn = computed(() => Boolean(autoRefresh.value) && !autoRefresh.value?.paused);
-const autoRefreshPaused = computed(() => Boolean(autoRefresh.value?.paused));
+const autoRefreshOn = computed(() => Boolean(autoRefresh.value));
 const autoRefreshTitle = computed(() => {
   const current = autoRefresh.value;
-  if (!current) {
-    return "Auto refresh";
-  }
-  const every = formatAutoRefresh(current.intervalMs);
-  return current.paused ? `Auto refresh paused (${every})` : `Auto refresh every ${every}`;
+  return current ? `Auto refresh every ${formatAutoRefresh(current.intervalMs)}` : "Auto refresh";
 });
 let autoRefreshTimer = 0;
 let autoRefreshClock = 0;
@@ -617,30 +613,26 @@ function setAutoRefresh(next: TableViewState["autoRefresh"]) {
   closeAutoRefreshMenu();
 }
 
-function pauseAutoRefresh() {
-  const current = autoRefresh.value;
-  setAutoRefresh({
-    intervalMs: current?.intervalMs ?? AUTO_REFRESH_PRESETS[1].ms,
-    paused: true,
-  });
-}
-
 function disableAutoRefresh() {
   setAutoRefresh(undefined);
 }
 
 function enableAutoRefresh(intervalMs: number) {
-  setAutoRefresh({ intervalMs: clampAutoRefreshMs(intervalMs), paused: false });
+  setAutoRefresh({ intervalMs: clampAutoRefreshMs(intervalMs) });
 }
 
 function openCustomRefresh() {
-  customRefreshSeconds.value = Math.round((autoRefresh.value?.intervalMs ?? 30_000) / 1000);
+  const total = Math.round((autoRefresh.value?.intervalMs ?? 30_000) / 1000);
+  customRefreshMinutes.value = Math.floor(total / 60);
+  customRefreshSeconds.value = total % 60;
   customRefresh.value = true;
   closeAutoRefreshMenu();
 }
 
 function applyCustomRefresh() {
-  enableAutoRefresh(customRefreshSeconds.value * 1000);
+  const minutes = Math.max(0, Math.floor(Number(customRefreshMinutes.value) || 0));
+  const seconds = Math.max(0, Math.floor(Number(customRefreshSeconds.value) || 0));
+  enableAutoRefresh((minutes * 60 + seconds) * 1000);
   customRefresh.value = false;
 }
 
@@ -663,7 +655,7 @@ function autoRefreshTick() {
     return;
   }
   const current = autoRefresh.value;
-  if (current && !current.paused) {
+  if (current) {
     scheduleNextRefresh(current.intervalMs);
   }
   if (dirty.value || loading.value || mode.value !== "data") {
@@ -679,7 +671,7 @@ function autoRefreshTick() {
 function startAutoRefreshTimer() {
   stopAutoRefreshTimer();
   const current = autoRefresh.value;
-  if (!current || current.paused || !autoRefreshArmed.value) {
+  if (!current || !autoRefreshArmed.value) {
     nextRefreshAt.value = 0;
     return;
   }
@@ -1455,7 +1447,7 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
         <div class="overflow-menu auto-refresh-menu">
           <button
             class="ghost tiny icon-only auto-refresh"
-            :class="{ enabled: autoRefreshOn, paused: autoRefreshPaused }"
+            :class="{ enabled: autoRefreshOn }"
             type="button"
             :title="autoRefreshTitle"
             :aria-label="autoRefreshTitle"
@@ -1468,19 +1460,9 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
               <path d="M12 7v5l3.46 2" />
               <path d="m16.6 19.2 2.7 2.3 2.7-2.3" />
             </svg>
-            <span v-if="autoRefreshOn || autoRefreshPaused" class="auto-refresh-dot" aria-hidden="true" />
+            <span v-if="autoRefreshOn" class="auto-refresh-dot" aria-hidden="true" />
           </button>
           <div v-if="autoRefreshMenuOpen" class="overflow-menu-dropdown" role="menu" aria-label="Auto refresh">
-            <button
-              class="overflow-menu-item"
-              type="button"
-              role="menuitemradio"
-              :aria-checked="autoRefreshPaused"
-              @click="pauseAutoRefresh"
-            >
-              Paused
-              <span v-if="autoRefreshPaused" class="menu-check" aria-hidden="true">✓</span>
-            </button>
             <button
               class="overflow-menu-item"
               type="button"
@@ -1488,7 +1470,7 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
               :aria-checked="!autoRefresh"
               @click="disableAutoRefresh"
             >
-              Disabled
+              Off
               <span v-if="!autoRefresh" class="menu-check" aria-hidden="true">✓</span>
             </button>
             <div class="overflow-menu-divider" role="separator" />
@@ -1759,18 +1741,18 @@ defineExpose({ refresh, pendingChanges, markSaved, discard });
       :hint="filterError || 'Click to edit filters (⌘F)'"
     />
     <Modal v-if="customRefresh" title="Auto refresh" @close="customRefresh = false">
-      <form @submit.prevent="applyCustomRefresh">
-        <label class="modal-label">
-          <span class="muted tiny">Refresh every (seconds)</span>
-          <input
-            v-model.number="customRefreshSeconds"
-            type="number"
-            min="1"
-            max="3600"
-            step="1"
-            required
-          />
-        </label>
+      <form @submit.prevent="applyCustomRefresh" @keydown.enter.prevent="applyCustomRefresh">
+        <span class="muted tiny">Refresh every</span>
+        <div class="auto-refresh-fields">
+          <label class="modal-label">
+            <span class="muted tiny">Minutes</span>
+            <input v-model.number="customRefreshMinutes" type="number" min="0" max="60" step="1" />
+          </label>
+          <label class="modal-label">
+            <span class="muted tiny">Seconds</span>
+            <input v-model.number="customRefreshSeconds" type="number" min="0" max="59" step="1" />
+          </label>
+        </div>
       </form>
       <template #actions>
         <button class="ghost" type="button" @click="customRefresh = false">Cancel</button>

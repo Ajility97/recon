@@ -103,7 +103,6 @@ export interface TableViewState {
 
 export interface AutoRefreshState {
   intervalMs: number;
-  paused: boolean;
 }
 
 export const AUTO_REFRESH_PRESETS = [
@@ -131,17 +130,14 @@ export function formatAutoRefresh(ms: number) {
 }
 
 export function sanitizeAutoRefresh(value: unknown): AutoRefreshState | undefined {
-  if (!value || typeof value !== "object") {
+  if (!value || typeof value !== "object" || (value as { paused?: unknown }).paused === true) {
     return undefined;
   }
   const intervalMs = Number((value as { intervalMs?: unknown }).intervalMs);
   if (!Number.isFinite(intervalMs)) {
     return undefined;
   }
-  return {
-    intervalMs: clampAutoRefreshMs(intervalMs),
-    paused: (value as { paused?: unknown }).paused === true,
-  };
+  return { intervalMs: clampAutoRefreshMs(intervalMs) };
 }
 
 export const TAB_PAGE_SIZES = [50, 100, 200, 300, 500] as const;
