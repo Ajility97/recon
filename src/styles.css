@@ -2692,11 +2692,17 @@ button.view-tab.active:hover:not(:disabled) {
   align-items: center;
   gap: 0.2rem;
   flex: 0 0 auto;
-  padding: 0.3rem 0.45rem 0;
+  padding: 0.3rem 0.45rem 0.2rem;
   overflow-x: auto;
   overflow-y: hidden;
-  border-bottom: 1px solid var(--border);
+  border-top: 1px solid var(--border);
   background: #0f1217;
+  /* Puts the overflow scrollbar above the tabs. Children flip back so labels stay upright. */
+  transform: scaleY(-1);
+}
+
+.subtab-bar > * {
+  transform: scaleY(-1);
 }
 
 /* A custom scrollbar stays visible whenever the tabs overflow, unlike macOS's auto-hiding one. */
