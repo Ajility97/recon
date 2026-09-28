@@ -6,6 +6,13 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "0.6.1",
+    date: "September 27, 2026",
+    notes: [
+      "The auto refresh menu beside a table's refresh button now opens above the column headers, so Off is no longer hidden behind them.",
+    ],
+  },
+  {
     version: "0.6.0",
     date: "September 27, 2026",
     notes: [

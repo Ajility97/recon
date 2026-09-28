@@ -3024,6 +3024,12 @@ button.view-tab.active:hover:not(:disabled) {
   border-bottom: 1px solid var(--border);
 }
 
+/* Above the grid, so toolbar menus open over its sticky header. */
+.table-view > .pane-toolbar {
+  position: relative;
+  z-index: 5;
+}
+
 /* Toolbar buttons keep their size; a long filter tag gives up the space instead. */
 .pane-toolbar button.tiny {
   display: inline-flex;
