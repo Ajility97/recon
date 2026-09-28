@@ -6,6 +6,13 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "0.6.2",
+    date: "September 28, 2026",
+    notes: [
+      "The active table tab now joins the line under the tab strip instead of sitting on top of it, and in split panes it matches the grid's background.",
+    ],
+  },
+  {
     version: "0.6.1",
     date: "September 27, 2026",
     notes: [
