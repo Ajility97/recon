@@ -6,6 +6,14 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "1.0.2",
+    date: "September 29, 2026",
+    notes: [
+      "Recon is now open source under the MIT license. You can use, change, share, and sell it with no restrictions beyond keeping the copyright notice.",
+      "Building Recon from source now uses Bun instead of npm. The README has the updated setup steps.",
+    ],
+  },
+  {
     version: "1.0.1",
     date: "September 28, 2026",
     notes: [
