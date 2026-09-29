@@ -6,6 +6,16 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
+    version: "1.1.0",
+    date: "September 29, 2026",
+    notes: [
+      "Groups and ungrouped connections now share one list on the Connections dashboard, so you can drag them into any order, like a connection between two groups.",
+      "To take a connection out of a group, drop it in the gap between entries or on the top half of a group's header. Dropping it lower on a group puts it inside.",
+      "Sort A–Z on the dashboard sorts groups and ungrouped connections together by name.",
+      "New groups appear at the top of the dashboard.",
+    ],
+  },
+  {
     version: "1.0.2",
     date: "September 29, 2026",
     notes: [
