@@ -1,5 +1,6 @@
-import { ref } from "vue";
+import { computed, ref } from "vue";
 import * as api from "../api";
+import { dashboardIds as orderDashboard } from "../dashboard";
 import type {
   AppData,
   ConnectionEntry,
@@ -26,6 +27,14 @@ export const DEFAULT_MAX_AUTO_COLUMN_WIDTH = 480;
 
 const groups = ref<ConnectionGroup[]>([]);
 const standaloneConnections = ref<ConnectionEntry[]>([]);
+const dashboardOrder = ref<string[]>([]);
+const dashboardIds = computed(() =>
+  orderDashboard(
+    dashboardOrder.value,
+    standaloneConnections.value.map((entry) => entry.id),
+    groups.value.map((group) => group.id),
+  ),
+);
 const savedQueries = ref<SavedQuery[]>([]);
 const error = ref("");
 const loaded = ref(false);
@@ -63,6 +72,7 @@ export function useApp() {
   function applyState(data: AppData) {
     groups.value = data.groups;
     standaloneConnections.value = data.connections ?? [];
+    dashboardOrder.value = data.dashboardOrder ?? [];
     savedQueries.value = data.savedQueries ?? [];
     editorFontFamily.value = sanitizeFontFamily(data.editorFontFamily ?? DEFAULT_CODE_FONT);
     editorFontSize.value = clampFontSize(
@@ -151,6 +161,7 @@ export function useApp() {
   async function createGroup(name: string, headerColor?: string) {
     const group = await api.createGroup(name, headerColor);
     groups.value = [group, ...groups.value];
+    dashboardOrder.value = [group.id, ...dashboardIds.value];
     return group;
   }
 
@@ -198,17 +209,43 @@ export function useApp() {
     });
   }
 
-  async function reorderGroups(groupIds: string[]) {
-    const byId = new Map(groups.value.map((group) => [group.id, group]));
-    if (groupIds.length !== groups.value.length || groupIds.some((id) => !byId.has(id))) {
-      throw new Error("Group list does not match saved groups.");
+  /** Grouped connections listed in `ids` move out of their group. */
+  async function reorderDashboard(ids: string[]) {
+    const previous = {
+      groups: groups.value,
+      standalone: standaloneConnections.value,
+      order: dashboardOrder.value,
+    };
+    const groupIds = new Set(groups.value.map((group) => group.id));
+    const standalone = new Map(standaloneConnections.value.map((entry) => [entry.id, entry]));
+    let nextGroups = groups.value;
+    for (const id of ids) {
+      if (groupIds.has(id) || standalone.has(id)) {
+        continue;
+      }
+      const found = findConnection(id);
+      if (!found?.group) {
+        throw new Error("Connection not found.");
+      }
+      standalone.set(id, found.connection);
+      nextGroups = nextGroups.map((group) =>
+        group.id === found.group!.id
+          ? { ...group, connections: group.connections.filter((item) => item.id !== id) }
+          : group,
+      );
     }
-    const previous = groups.value;
-    groups.value = groupIds.map((id) => byId.get(id)!);
+    const position = new Map(ids.map((id, index) => [id, index]));
+    const byPosition = (left: { id: string }, right: { id: string }) =>
+      (position.get(left.id) ?? 0) - (position.get(right.id) ?? 0);
+    groups.value = [...nextGroups].sort(byPosition);
+    standaloneConnections.value = [...standalone.values()].sort(byPosition);
+    dashboardOrder.value = ids;
     try {
-      await api.reorderGroups(groupIds);
+      await api.reorderDashboard(ids);
     } catch (err) {
-      groups.value = previous;
+      groups.value = previous.groups;
+      standaloneConnections.value = previous.standalone;
+      dashboardOrder.value = previous.order;
       throw err;
     }
   }
@@ -361,6 +398,8 @@ export function useApp() {
   return {
     groups,
     standaloneConnections,
+    dashboardOrder,
+    dashboardIds,
     savedQueries,
     error,
     loaded,
@@ -390,7 +429,7 @@ export function useApp() {
     deleteGroup,
     toggleGroup,
     setAllGroupsExpanded,
-    reorderGroups,
+    reorderDashboard,
     findConnection,
     saveConnection,
     removeConnection,

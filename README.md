@@ -15,7 +15,7 @@
 
 ## First-time setup
 
-Recon is a [Tauri](https://v2.tauri.app/) app: a Vue frontend plus a Rust native shell. You need **Node**, **Rust**, and **Xcode Command Line Tools** before `npm run tauri dev` will work.
+Recon is a [Tauri](https://v2.tauri.app/) app: a Vue frontend plus a Rust native shell. You need **Bun**, **Rust**, and **Xcode Command Line Tools** before `bun run tauri dev` will work.
 
 ### 1. Clone the repo
 
@@ -38,13 +38,13 @@ If that says they are already installed, you are fine. Confirm with:
 xcode-select -p
 ```
 
-### 3. Node.js 20+
+### 3. Bun
 
-Install from [nodejs.org](https://nodejs.org/) or Homebrew:
+Install with the official script from [bun.sh](https://bun.sh/):
 
 ```bash
-brew install node
-node -v   # v20 or newer
+curl -fsSL https://bun.sh/install | bash
+bun --version
 ```
 
 ### 4. Rust
@@ -61,13 +61,13 @@ Accept the defaults, then **open a new terminal** and confirm:
 cargo --version
 ```
 
-`npm run tauri dev` already prepends `$HOME/.cargo/bin` to `PATH`.
+`bun run tauri dev` already prepends `$HOME/.cargo/bin` to `PATH`.
 
 ### 5. Install JS dependencies and start the app
 
 ```bash
-npm install
-npm run tauri dev
+bun install
+bun run tauri dev
 ```
 
 That command:
@@ -89,7 +89,7 @@ The **first** `tauri dev` (or `tauri build`) downloads crates and compiles from 
 ## Export a native Mac app
 
 ```bash
-npm run tauri build
+bun run tauri build
 ```
 
 | Artifact | Path |
@@ -113,4 +113,4 @@ Rust is not installed. Run step 4, open a new terminal, and confirm `command -v 
 Xcode Command Line Tools are missing or stale. Run `xcode-select --install`.
 
 **Frontend only (browser, no native APIs)**  
-`npm run dev` serves the Vue app at `http://localhost:1420`. Database connections, dialogs, and other Tauri APIs need `npm run tauri dev`.
+`bun run dev` serves the Vue app at `http://localhost:1420`. Database connections, dialogs, and other Tauri APIs need `bun run tauri dev`.

@@ -6,10 +6,28 @@ export interface ChangelogRelease {
 
 export const CHANGELOG: ChangelogRelease[] = [
   {
-    version: "1.0.2",
-    date: "September 28, 2026",
+    version: "1.1.1",
+    date: "September 30, 2026",
     notes: [
       "With a table name focused in the sidebar, typing goes into Filter tables, including the first character.",
+    ],
+  },
+  {
+    version: "1.1.0",
+    date: "September 29, 2026",
+    notes: [
+      "Groups and ungrouped connections now share one list on the Connections dashboard, so you can drag them into any order, like a connection between two groups.",
+      "To take a connection out of a group, drop it in the gap between entries or on the top half of a group's header. Dropping it lower on a group puts it inside.",
+      "Sort A–Z on the dashboard sorts groups and ungrouped connections together by name.",
+      "New groups appear at the top of the dashboard.",
+    ],
+  },
+  {
+    version: "1.0.2",
+    date: "September 29, 2026",
+    notes: [
+      "Recon is now open source under the MIT license. You can use, change, share, and sell it with no restrictions beyond keeping the copyright notice.",
+      "Building Recon from source now uses Bun instead of npm. The README has the updated setup steps.",
     ],
   },
   {

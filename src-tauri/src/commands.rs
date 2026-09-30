@@ -269,6 +269,7 @@ pub fn create_group(
     };
     let mut data = lock(&state)?;
     data.groups.insert(0, group.clone());
+    data.dashboard_order.insert(0, group.id.clone());
     persist::save(&app, &data)?;
     Ok(group)
 }
@@ -340,15 +341,52 @@ pub fn set_all_groups_expanded(
     persist::save(&app, &data)
 }
 
+/**
+ * Applies a dashboard order of group ids and ungrouped connection ids. A
+ * grouped connection listed here is moved out of its group.
+ */
+fn arrange_dashboard(data: &mut AppData, ids: Vec<String>) -> Result<(), String> {
+    for id in &ids {
+        let top_level = data.groups.iter().any(|group| &group.id == id)
+            || data.connections.iter().any(|entry| &entry.id == id);
+        if !top_level {
+            let entry = take_connection(data, id).ok_or_else(|| "Connection not found".to_string())?;
+            data.connections.push(entry);
+        }
+    }
+    let expected = data.dashboard_ids();
+    let unique: std::collections::HashSet<&String> = ids.iter().collect();
+    if unique.len() != ids.len()
+        || ids.len() != expected.len()
+        || !expected.iter().all(|id| unique.contains(id))
+    {
+        return Err("Dashboard list does not match saved groups and connections.".into());
+    }
+    let position: HashMap<&str, usize> = ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (id.as_str(), index))
+        .collect();
+    data.groups
+        .sort_by_key(|group| position.get(group.id.as_str()).copied());
+    data.connections
+        .sort_by_key(|entry| position.get(entry.id.as_str()).copied());
+    data.dashboard_order = ids;
+    Ok(())
+}
+
 #[tauri::command]
-pub fn reorder_groups(
+pub fn reorder_dashboard(
     app: AppHandle,
     state: State<AppState>,
-    group_ids: Vec<String>,
+    ids: Vec<String>,
 ) -> Result<(), String> {
     let mut data = lock(&state)?;
-    reorder_by_ids(&mut data.groups, group_ids, |group| &group.id, "Group")?;
-    persist::save(&app, &data)
+    let mut next = data.clone();
+    arrange_dashboard(&mut next, ids)?;
+    persist::save(&app, &next)?;
+    *data = next;
+    Ok(())
 }
 
 #[tauri::command]
@@ -739,6 +777,38 @@ mod tests {
         find_group_mut(&mut data, "g1").unwrap().connections.push(taken);
         assert_eq!(connection_location(&data, "c1"), Some((Some("g1".into()), 0)));
         assert!(data.connections.is_empty());
+    }
+
+    #[test]
+    fn arranges_groups_and_connections_together() {
+        let mut data = AppData::default();
+        for id in ["g1", "g2"] {
+            data.groups.push(ConnectionGroup {
+                id: id.into(),
+                name: id.into(),
+                expanded: true,
+                header_color: DEFAULT_GROUP_COLOR.into(),
+                connections: Vec::new(),
+            });
+        }
+        let conn = |id: &str| {
+            let mut conn = sanitize_connection(entry(Driver::Mysql)).unwrap();
+            conn.id = id.into();
+            conn
+        };
+        data.connections.push(conn("c1"));
+        data.groups[1].connections.push(conn("c2"));
+        assert_eq!(data.dashboard_ids(), ["c1", "g1", "g2"]);
+
+        let ids = |items: &[&str]| items.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+        arrange_dashboard(&mut data, ids(&["g2", "c2", "c1", "g1"])).unwrap();
+        assert_eq!(data.dashboard_ids(), ["g2", "c2", "c1", "g1"]);
+        assert_eq!(connection_location(&data, "c2"), Some((None, 0)));
+        assert_eq!(data.groups[0].id, "g2");
+        assert!(data.groups[0].connections.is_empty());
+
+        assert!(arrange_dashboard(&mut data, ids(&["g2", "c1", "g1"])).is_err());
+        assert!(arrange_dashboard(&mut data, ids(&["g2", "c2", "c2", "c1", "g1"])).is_err());
     }
 
     #[test]

@@ -54,7 +54,7 @@ pub fn run() {
             commands::delete_group,
             commands::toggle_group,
             commands::set_all_groups_expanded,
-            commands::reorder_groups,
+            commands::reorder_dashboard,
             commands::save_connection,
             commands::remove_connection,
             commands::reorder_connections,

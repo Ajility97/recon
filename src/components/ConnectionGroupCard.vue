@@ -3,7 +3,7 @@ import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { useApp } from "../composables/useApp";
 import { useConnectionForm } from "../composables/useConnectionForm";
-import { alphabeticalIds } from "../composables/useDragReorder";
+import { alphabeticalIds } from "../dashboard";
 import { useOverflowMenu } from "../composables/useOverflowMenu";
 import { useTabs } from "../composables/useTabs";
 import { contrastingText, DEFAULT_HEADER_COLOR } from "../color";
@@ -179,7 +179,6 @@ function onHeaderClick(event: MouseEvent) {
     class="group"
     :class="{ dragging, sortable, 'drop-target': dropTarget }"
     :data-group-id="draft ? undefined : group.id"
-    :data-connection-drop="draft ? undefined : group.id"
   >
     <div
       class="group-header"

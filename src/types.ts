@@ -79,6 +79,7 @@ export interface SavedQuery {
 export interface AppData {
   groups: ConnectionGroup[];
   connections?: ConnectionEntry[];
+  dashboardOrder?: string[];
   savedQueries?: SavedQuery[];
   editorFontFamily?: string;
   editorFontSize?: number;

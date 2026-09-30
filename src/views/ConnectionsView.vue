@@ -2,9 +2,9 @@
 import { computed, ref } from "vue";
 import { useApp } from "../composables/useApp";
 import { useConnectionForm } from "../composables/useConnectionForm";
-import { STANDALONE_LIST, useConnectionDrag } from "../composables/useConnectionDrag";
-import { alphabeticalIds, useDragReorder } from "../composables/useDragReorder";
-import type { ConnectionGroup } from "../types";
+import { useDashboardDrag } from "../composables/useDashboardDrag";
+import { alphabeticalIds } from "../dashboard";
+import type { ConnectionEntry, ConnectionGroup } from "../types";
 import ConnectionGroupCard from "../components/ConnectionGroupCard.vue";
 import ConnectionRow from "../components/ConnectionRow.vue";
 
@@ -16,78 +16,91 @@ const DRAFT_GROUP: ConnectionGroup = {
   connections: [],
 };
 
+type DashboardEntry =
+  | { kind: "group"; id: string; group: ConnectionGroup }
+  | { kind: "connection"; id: string; connection: ConnectionEntry };
+
 const {
   groups,
   standaloneConnections,
+  dashboardIds,
   setAllGroupsExpanded,
-  reorderGroups,
-  reorderConnections,
+  reorderDashboard,
   moveConnection,
   showToast,
 } = useApp();
 const { openNewConnection } = useConnectionForm();
 const creating = ref(false);
 
-const groupIds = () => groups.value.map((group) => group.id);
-const standaloneIds = () => standaloneConnections.value.map((connection) => connection.id);
-
-const groupReorder = useDragReorder({
-  ids: groupIds,
-  selector: "[data-group-id]",
-  datasetKey: "groupId",
-  bodyClass: "reordering-groups",
-  commit: reorderGroups,
-  isBefore(element, event) {
-    const header = element.querySelector(".group-header");
-    const rect = (header instanceof HTMLElement ? header : element).getBoundingClientRect();
-    return event.clientY <= rect.bottom && event.clientY < rect.top + rect.height / 2;
-  },
+const groupById = computed(() => new Map(groups.value.map((group) => [group.id, group])));
+const connectionById = computed(() => {
+  const entries = [
+    ...standaloneConnections.value,
+    ...groups.value.flatMap((group) => group.connections),
+  ];
+  return new Map(entries.map((entry) => [entry.id, entry]));
 });
 
-const connectionDrag = useConnectionDrag({
-  groups,
-  standalone: standaloneConnections,
-  commit: moveConnection,
+const drag = useDashboardDrag({
+  layout: () => ({
+    root: [...dashboardIds.value],
+    groups: Object.fromEntries(
+      groups.value.map((group) => [group.id, group.connections.map((entry) => entry.id)]),
+    ),
+  }),
+  itemSelector: "[data-connection-id]",
+  itemKey: "connectionId",
+  isCollapsed: (groupId) => !groupById.value.get(groupId)?.expanded,
+  commitRoot: reorderDashboard,
+  commitGroup: moveConnection,
   onError: (err) => showToast(String(err), "error"),
 });
 
-const visibleGroups = computed(() => groupReorder.ordered(groups.value));
-const visibleStandalone = computed(() =>
-  connectionDrag.connectionsFor(STANDALONE_LIST, standaloneConnections.value),
+const entries = computed(() =>
+  drag.rootIds(dashboardIds.value).flatMap((id): DashboardEntry[] => {
+    const group = groupById.value.get(id);
+    if (group) {
+      return [{ kind: "group", id, group }];
+    }
+    const connection = connectionById.value.get(id);
+    return connection ? [{ kind: "connection", id, connection }] : [];
+  }),
 );
-const visibleStandaloneIds = computed(() => visibleStandalone.value.map((item) => item.id));
-const draggingConnectionId = computed(() => connectionDrag.draggingId.value);
-const showStandaloneList = computed(() => standaloneConnections.value.length > 0);
-const showUngroupZone = computed(
-  () => !showStandaloneList.value && Boolean(draggingConnectionId.value),
+const topLevelConnectionIds = computed(() =>
+  entries.value.filter((entry) => entry.kind === "connection").map((entry) => entry.id),
 );
 
-const isEmpty = computed(() => !groups.value.length && !standaloneConnections.value.length);
+function groupConnections(group: ConnectionGroup) {
+  const ids = drag.groupItemIds(group.id);
+  if (!ids) {
+    return group.connections;
+  }
+  return ids.flatMap((id) => {
+    const entry = connectionById.value.get(id);
+    return entry ? [entry] : [];
+  });
+}
+
+const isEmpty = computed(() => !dashboardIds.value.length);
 const hasGroups = computed(() => groups.value.length > 0);
 const canExpandAll = computed(() => groups.value.some((group) => !group.expanded));
 const canCollapseAll = computed(() => groups.value.some((group) => group.expanded));
-const canSortGroups = computed(() => groups.value.length > 1);
-const canSortStandalone = computed(() => standaloneConnections.value.length > 1);
-const canDragConnections = computed(() => hasGroups.value || canSortStandalone.value);
+const canSortEntries = computed(() => dashboardIds.value.length > 1);
+const canDragConnections = computed(() => hasGroups.value || canSortEntries.value);
 
-const canSortGroupsAlpha = computed(
-  () => canSortGroups.value && alphabeticalIds(groups.value).join("\0") !== groupIds().join("\0"),
+const alphaIds = computed(() =>
+  alphabeticalIds([...groups.value, ...standaloneConnections.value]),
 );
-const canSortStandaloneAlpha = computed(
-  () =>
-    canSortStandalone.value &&
-    alphabeticalIds(standaloneConnections.value).join("\0") !== standaloneIds().join("\0"),
+const canSortAlpha = computed(
+  () => canSortEntries.value && alphaIds.value.join("\0") !== dashboardIds.value.join("\0"),
 );
-const canSortAlpha = computed(() => canSortGroupsAlpha.value || canSortStandaloneAlpha.value);
 
 async function sortAlphabetically() {
+  if (!canSortAlpha.value) {
+    return;
+  }
   try {
-    if (canSortGroupsAlpha.value) {
-      await reorderGroups(alphabeticalIds(groups.value));
-    }
-    if (canSortStandaloneAlpha.value) {
-      await reorderConnections(null, alphabeticalIds(standaloneConnections.value));
-    }
+    await reorderDashboard(alphaIds.value);
   } catch (err) {
     showToast(String(err), "error");
   }
@@ -150,32 +163,10 @@ async function sortAlphabetically() {
         </p>
 
         <div
-          v-if="showStandaloneList || showUngroupZone"
-          class="standalone-list"
-          :class="{
-            reordering: connectionDrag.draftKey.value === STANDALONE_LIST,
-            trailing: showUngroupZone,
-            'drop-target': connectionDrag.dropKey.value === STANDALONE_LIST,
-          }"
-          :data-connection-drop="STANDALONE_LIST"
+          class="groups-list"
+          data-dashboard-root
+          :class="{ reordering: Boolean(drag.draggingGroupId.value) }"
         >
-          <ConnectionRow
-            v-for="connection in visibleStandalone"
-            :key="connection.id"
-            :connection="connection"
-            :group-id="null"
-            :sibling-ids="visibleStandaloneIds"
-            flush
-            :sortable="canDragConnections"
-            :dragging="draggingConnectionId === connection.id"
-            @reorder-start="connectionDrag.start"
-          />
-          <p v-if="!visibleStandalone.length" class="muted tiny standalone-drop-hint">
-            Drop here to remove from group
-          </p>
-        </div>
-
-        <div class="groups-list" :class="{ reordering: Boolean(groupReorder.draggingId.value) }">
           <ConnectionGroupCard
             v-if="creating"
             :group="DRAFT_GROUP"
@@ -183,19 +174,32 @@ async function sortAlphabetically() {
             @cancel="creating = false"
             @created="creating = false"
           />
-          <ConnectionGroupCard
-            v-for="group in visibleGroups"
-            :key="group.id"
-            :group="group"
-            :sortable="canSortGroups"
-            :dragging="groupReorder.draggingId.value === group.id"
-            :connections="connectionDrag.connectionsFor(group.id, group.connections)"
-            :connections-sortable="canDragConnections"
-            :dragging-connection-id="draggingConnectionId"
-            :drop-target="connectionDrag.dropKey.value === group.id"
-            @reorder-start="groupReorder.start"
-            @connection-drag-start="connectionDrag.start"
-          />
+          <template v-for="entry in entries" :key="entry.id">
+            <ConnectionGroupCard
+              v-if="entry.kind === 'group'"
+              :data-dashboard-id="entry.id"
+              :group="entry.group"
+              :sortable="canSortEntries"
+              :dragging="drag.draggingGroupId.value === entry.id"
+              :connections="groupConnections(entry.group)"
+              :connections-sortable="canDragConnections"
+              :dragging-connection-id="drag.draggingItemId.value"
+              :drop-target="drag.dropGroupId.value === entry.id"
+              @reorder-start="(event, id) => drag.start(event, 'group', id)"
+              @connection-drag-start="(event, id) => drag.start(event, 'item', id)"
+            />
+            <ConnectionRow
+              v-else
+              :data-dashboard-id="entry.id"
+              :connection="entry.connection"
+              :group-id="null"
+              :sibling-ids="topLevelConnectionIds"
+              flush
+              :sortable="canDragConnections"
+              :dragging="drag.draggingItemId.value === entry.id"
+              @reorder-start="(event, id) => drag.start(event, 'item', id)"
+            />
+          </template>
         </div>
       </div>
     </div>

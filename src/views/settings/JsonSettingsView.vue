@@ -14,6 +14,7 @@ import type { AppData } from "../../types";
 const {
   groups,
   standaloneConnections,
+  dashboardOrder,
   savedQueries,
   editorFontFamily,
   editorFontSize,
@@ -198,6 +199,7 @@ watch(
   [
     groups,
     standaloneConnections,
+    dashboardOrder,
     savedQueries,
     editorFontFamily,
     editorFontSize,

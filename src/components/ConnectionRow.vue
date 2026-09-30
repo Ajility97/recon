@@ -122,7 +122,6 @@ async function onRemove() {
     }"
     :style="headerStyle"
     :data-connection-id="connection.id"
-    :data-connection-list="groupId ?? ''"
     @click="handleClick"
   >
     <span

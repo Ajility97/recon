@@ -47,8 +47,8 @@ export function setAllGroupsExpanded(expanded: boolean) {
   return invoke<void>("set_all_groups_expanded", { expanded });
 }
 
-export function reorderGroups(groupIds: string[]) {
-  return invoke<void>("reorder_groups", { groupIds });
+export function reorderDashboard(ids: string[]) {
+  return invoke<void>("reorder_dashboard", { ids });
 }
 
 export function saveConnection(

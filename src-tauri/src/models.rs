@@ -265,6 +265,9 @@ pub struct AppData {
     pub groups: Vec<ConnectionGroup>,
     #[serde(default)]
     pub connections: Vec<ConnectionEntry>,
+    /// Group ids and ungrouped connection ids, in dashboard order.
+    #[serde(default)]
+    pub dashboard_order: Vec<String>,
     #[serde(default)]
     pub saved_queries: Vec<SavedQuery>,
     #[serde(default = "default_code_font")]
@@ -299,6 +302,7 @@ impl Default for AppData {
         Self {
             groups: Vec::new(),
             connections: Vec::new(),
+            dashboard_order: Vec::new(),
             saved_queries: Vec::new(),
             editor_font_family: default_code_font(),
             editor_font_size: default_editor_font_size(),
@@ -322,6 +326,27 @@ impl AppData {
             .iter()
             .chain(self.groups.iter().flat_map(|group| group.connections.iter()))
             .find(|entry| entry.id == connection_id)
+    }
+
+    /**
+     * The saved dashboard order without stale ids. Anything missing from it
+     * follows, ungrouped connections first, matching the layout before
+     * groups and connections could be interleaved.
+     */
+    pub fn dashboard_ids(&self) -> Vec<String> {
+        let known: Vec<&str> = self
+            .connections
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .chain(self.groups.iter().map(|group| group.id.as_str()))
+            .collect();
+        let mut ids: Vec<String> = Vec::with_capacity(known.len());
+        for id in self.dashboard_order.iter().map(String::as_str).chain(known.iter().copied()) {
+            if known.contains(&id) && !ids.iter().any(|item| item == id) {
+                ids.push(id.to_string());
+            }
+        }
+        ids
     }
 }
 
